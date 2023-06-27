@@ -11,9 +11,6 @@
 
 #include <nlohmann/json.hpp>
 
-// for benchmarking
-const int NLOOPS = 10;
-
 /*
 extern float* gpuTransferFloats(float *data, int size);
 extern void gpuDumpMemoryInfo();
@@ -40,6 +37,15 @@ template <int N> struct Tensorf {
     shape[1] = j;
     // allocate aligned float array
     alloc = new float[i * j + 7];
+    data = (float *)(((uintptr_t)alloc + 31) & ~31);
+  }
+
+  Tensorf(int i, int j, int k) {
+    shape[0] = i;
+    shape[1] = j;
+    shape[2] = k;
+    // allocate aligned float array
+    alloc = new float[i * j * k + 7];
     data = (float *)(((uintptr_t)alloc + 31) & ~31);
   }
 
@@ -97,20 +103,24 @@ template <int N> struct Tensorf {
     return data[i];
   }
 
-  Tensorf<N-1> row(int i) const {
-    if (N != 2) {
-      fprintf(stderr, "Tensorf: row: expected 2 dimensions, got %d\n", N);
+  Tensorf<N-1> slice(int i) const {
+    if (N <= 1) {
+      fprintf(stderr, "Tensorf: row: expected >1 dimensions, got %d\n", N);
       abort();
     }
     if (i >= shape[0]) {
-      fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", i, shape[N-2]);
+      fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", i, shape[0]);
       abort();
     }
     // return new tensor with no alloc, so it won't destroy the underlying array
     // when it goes out of scope
     Tensorf<N-1> out;
-    out.shape[0] = shape[1];
-    out.data = data + i * shape[1];
+    int stride = 1;
+    for (int j = 0; j < N-1; j++) {
+      out.shape[j] = shape[j+1];
+      stride *= shape[j+1];
+    }
+    out.data = data + i * stride;
     out.alloc = NULL;
     return out;
   }
@@ -299,7 +309,7 @@ static void saxpy(int n, float a, float * const x, float *y) {
     dest[i] += a * src[i];
   }
 #else
-  // n is assumed to be a multiple of 8
+  // n is assumed to be a multiple of 8 and y is assumed to be aligned
   __m256 a_vec = _mm256_set1_ps(a);
   int i = 0;
   for (; i < n; i += 8) {
@@ -371,7 +381,7 @@ int main() {
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
-  for (int iter = 0; iter < NLOOPS; iter++) {
+  {
     const int N = 9;
     int test_vector[N] = {464, 6290,  287,  599,  391, 8953, 8384,  319,  262};
     Tensorf<2> input(N, m.embedding_dim);
@@ -382,7 +392,10 @@ int main() {
         input(i, j) = m.wte_weight(test_vector[i], j) + m.wpe_weight(i, j);
       }
     }
-    Tensorf<2> qkvbuf(N, 3*m.embedding_dim);
+    // query buf (reused for each layer)
+    Tensorf<2> qbuf(N, m.embedding_dim);
+    // per-layer key-value buf (retained between subsequent tokens)
+    Tensorf<3> kvbuf(12, N, 2*m.embedding_dim);
     // TODO: transpose attnbuf
     Tensorf<2> attnbuf(N, m.h[0].attn.num_heads);
     Tensorf<2> xbuf(N, m.embedding_dim);
@@ -393,19 +406,22 @@ int main() {
     for (int l = 0; l < 12; l++) {
       // transformer blocks
       ybuf.zero();
+      Tensorf<2> lkvbuf = kvbuf.slice(l);
       for (int i = 0; i < N; i++) {
         // layernorm
-        m.h[l].ln_1.apply(xbuf.row(i), input.row(i));
+        m.h[l].ln_1.apply(xbuf.slice(i), input.slice(i));
         // self-attention
         // matmul into qkvbuf; noting that weights are transposed
         // so we sum each input entry into the qkv buf
-        for (int k = 0; k < 3*m.embedding_dim; k++) {
-          qkvbuf(i, k) = m.h[l].attn.c_attn_bias[k];
-        }
         float *w = m.h[l].attn.c_attn_weight.data;
         float *x = xbuf.data + i*m.embedding_dim;
-        for (int k = 0; k < 3*m.embedding_dim; k++) {
-          qkvbuf(i, k) += dot(x, w, m.embedding_dim);
+        float *b = m.h[l].attn.c_attn_bias.data;
+        for (int k = 0; k < m.embedding_dim; k++) {
+          qbuf(i, k) = (*b++) + dot(x, w, m.embedding_dim);
+          w += m.embedding_dim;
+        }
+        for (int k = 0; k < 2*m.embedding_dim; k++) {
+          lkvbuf(i, k) = (*b++) + dot(x, w, m.embedding_dim);
           w += m.embedding_dim;
         }
       }
@@ -423,21 +439,20 @@ int main() {
       int head_siz = m.embedding_dim / num_heads;
       float attn_scale = 1.0 / sqrt(head_siz);
       int qoff = 0;
-      attnbuf.zero();
+      //attnbuf.zero();
       for (int i = 0; i < N; i++) {
-
         // for generation, we don't need to compute the full attention matrix
         // for the last block, but it uses information from all previous tokens
         // & blocks.
         if (l == 11 && i < N-1) continue;
 
         for (int j = 0; j <= i; j++) {
-          float *qk = qkvbuf.data + i*3*m.embedding_dim;
-          float *vk = qkvbuf.data + j*3*m.embedding_dim + m.embedding_dim;
+          float *qk = qbuf.data + i*m.embedding_dim;
+          float *kk = lkvbuf.data + j*2*m.embedding_dim;
           for (int h = 0; h < num_heads; h++) {
-            attnbuf(j, h) = dot(qk, vk, head_siz) * attn_scale;
+            attnbuf(j, h) = dot(qk, kk, head_siz) * attn_scale;
             qk += head_siz;
-            vk += head_siz;
+            kk += head_siz;
           }
         }
         // softmax
@@ -463,8 +478,8 @@ int main() {
         // finally accumulate attention @ values -> ybuf
         for (int j = 0; j <= i; j++) {
           float *y = ybuf.data + i*m.embedding_dim;
-          int voff = m.embedding_dim*2;
-          float *v = qkvbuf.data + j*3*m.embedding_dim + voff;
+          int voff = m.embedding_dim;
+          float *v = lkvbuf.data + j*2*m.embedding_dim + voff;
           float *a = attnbuf.data + j*num_heads;
           for (int h = 0; h < num_heads; h++) {
             saxpy(head_siz, *a++, v, y);
@@ -481,7 +496,7 @@ int main() {
         }
 
         // fc part of block
-        m.h[l].ln_2.apply(xbuf.row(i), input.row(i));
+        m.h[l].ln_2.apply(xbuf.slice(i), input.slice(i));
         int hidden_dim = 4*m.embedding_dim;
         float *fc_w = m.h[l].mlp_c_fc_weight.data;
         for (int j = 0; j < hidden_dim; j++) {
@@ -501,16 +516,16 @@ int main() {
         }
       }
       printf("x(%d):\n", l);
-      input.row(N-1).show();
+      input.slice(N-1).show();
     }
 
     // finally, layernorm and dot with embedding matrix
     for (int i = N-1; i < N; i++) {
-      m.ln_f.apply(ybuf.row(i), input.row(i));
+      m.ln_f.apply(ybuf.slice(i), input.slice(i));
       float *w = m.wte_weight.data;
       int largmax = 0;
       for (int j = 0; j < m.ntokens; j++) {
-        logits[j] = dot(ybuf.row(i).data, w, m.embedding_dim);
+        logits[j] = dot(ybuf.slice(i).data, w, m.embedding_dim);
         w += m.embedding_dim;
         if (logits[j] > logits[largmax]) {
           largmax = j;
@@ -525,5 +540,5 @@ int main() {
 
   clock_gettime(CLOCK_MONOTONIC, &t1);
   double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-  printf("elapsed: %f, %f/loop\n", elapsed, elapsed/NLOOPS);
+  printf("elapsed: %f\n", elapsed);
 }
