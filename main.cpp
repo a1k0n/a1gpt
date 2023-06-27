@@ -6,8 +6,9 @@
 
 #include <string>
 
-// SSE
+#ifdef __AVX__
 #include <immintrin.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -306,7 +307,7 @@ static float dot(float *a, float *b, int n) {
 static void saxpy(int n, float a, float * const x, float *y) {
 #ifndef __AVX__
   for (int i = 0; i < n; i++) {
-    dest[i] += a * src[i];
+    y[i] += a * x[i];
   }
 #else
   // n is assumed to be a multiple of 8 and y is assumed to be aligned
