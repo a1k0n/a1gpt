@@ -6,6 +6,9 @@
 
 #include <string>
 
+// SSE
+#include <immintrin.h>
+
 #include <nlohmann/json.hpp>
 
 /*
@@ -119,6 +122,19 @@ template <int N> struct Tensorf {
   void destroy() {
     delete[] data;
   }
+
+  Tensorf<2> TransposedCopy() {
+    Tensorf<2> out;
+    out.shape[0] = shape[1];
+    out.shape[1] = shape[0];
+    out.data = new float[out.shape[0] * out.shape[1]];
+    for (int i = 0; i < shape[0]; i++) {
+      for (int j = 0; j < shape[1]; j++) {
+        out(j, i) = (*this)(i, j);
+      }
+    }
+    return out;
+  }
 };
 
 Tensorf<2> NewMatrix(int i, int j) {
@@ -180,11 +196,11 @@ struct Model {
   int embedding_dim;
   int num_tokens;
   int context_len;
+  int ntokens;
 
   Tensorf<2> wte_weight;
   Tensorf<2> wpe_weight;
-  Tensorf<1> ln_f_weight;
-  Tensorf<1> ln_f_bias;
+  LayerNorm ln_f;
 
   TransformerBlock *h;
 };
@@ -218,6 +234,60 @@ Tensorf<N> fetch_layer_weights(const nlohmann::json &j, void *addr, int layer, c
   return fetch_weights<N>(j, addr, buf);
 }
 
+static float dot(float *a, float *b, int n) {
+#ifndef __AVX__
+  float sum = 0;
+  for (int i = 0; i < n; i++) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+#else // vectorized dot product
+  int i = 0;
+  float sum = 0;
+  if (n > 7) {
+    __m256 sum8 = _mm256_setzero_ps(); // accumulate in a vector
+    int n8 = n/8;
+    for (; i < n8*8; i += 8) {
+      __m256 a8 = _mm256_loadu_ps(a + i);
+      __m256 b8 = _mm256_loadu_ps(b + i);
+      __m256 prod = _mm256_mul_ps(a8, b8);
+      sum8 = _mm256_add_ps(sum8, prod);
+    }
+    // sum up the vector
+    __m128 low128 = _mm256_extractf128_ps(sum8, 0);
+    __m128 high128 = _mm256_extractf128_ps(sum8, 1);
+    low128 = _mm_add_ps(low128, high128);
+    low128 = _mm_hadd_ps(low128, low128);
+    low128 = _mm_hadd_ps(low128, low128);
+    sum = _mm_cvtss_f32(low128);
+  }
+  for (; i < n; i++) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+#endif
+}
+
+static void saxpy(int n, float a, float * const x, float *y) {
+#ifndef __AVX__
+  for (int i = 0; i < n; i++) {
+    dest[i] += a * src[i];
+  }
+#else
+  // n is assumed to be a multiple of 8
+  __m256 a_vec = _mm256_set1_ps(a);
+  int i = 0;
+  for (; i < n; i += 8) {
+      __m256 src_vec = _mm256_load_ps(x + i);
+      __m256 dest_vec = _mm256_load_ps(y + i);
+      __m256 result_vec = _mm256_add_ps(dest_vec, _mm256_mul_ps(a_vec, src_vec));
+      _mm256_store_ps(y + i, result_vec);
+  }
+  assert(i == n && "axpy: n is not a multiple of 8");
+#endif
+}
+
+
 int main() {
   // mmap "model.safetensors" into memory
   int fd = open("model.safetensors", O_RDONLY);
@@ -241,27 +311,29 @@ int main() {
   m.h = new TransformerBlock[12];
   m.wte_weight = fetch_weights<2>(j, addr, "wte.weight");
   m.wpe_weight = fetch_weights<2>(j, addr, "wpe.weight");
-  m.ln_f_bias = fetch_weights<1>(j, addr, "ln_f.bias");
-  m.ln_f_weight = fetch_weights<1>(j, addr, "ln_f.weight");
+  m.ln_f.bias = fetch_weights<1>(j, addr, "ln_f.bias");
+  m.ln_f.weight = fetch_weights<1>(j, addr, "ln_f.weight");
   m.embedding_dim = m.wte_weight.shape[1];
   m.context_len = m.wpe_weight.shape[0];
+  m.ntokens = m.wte_weight.shape[0];
   printf("embedding_dim: %d\n", m.embedding_dim);
   printf("context_len: %d\n", m.context_len);
+  printf("ntokens: %d\n", m.ntokens);
 
   for (int i = 0; i < 12; i++) {
     m.h[i].attn.num_heads = 12;
     m.h[i].attn.c_attn_bias = fetch_layer_weights<1>(j, addr, i, "attn.c_attn.bias");
-    m.h[i].attn.c_attn_weight = fetch_layer_weights<2>(j, addr, i, "attn.c_attn.weight");
+    m.h[i].attn.c_attn_weight = fetch_layer_weights<2>(j, addr, i, "attn.c_attn.weight").TransposedCopy();
     m.h[i].attn.c_proj_bias = fetch_layer_weights<1>(j, addr, i, "attn.c_proj.bias");
-    m.h[i].attn.c_proj_weight = fetch_layer_weights<2>(j, addr, i, "attn.c_proj.weight");
+    m.h[i].attn.c_proj_weight = fetch_layer_weights<2>(j, addr, i, "attn.c_proj.weight").TransposedCopy();
     m.h[i].ln_1.bias = fetch_layer_weights<1>(j, addr, i, "ln_1.bias");
     m.h[i].ln_1.weight = fetch_layer_weights<1>(j, addr, i, "ln_1.weight");
     m.h[i].ln_2.bias = fetch_layer_weights<1>(j, addr, i, "ln_2.bias");
     m.h[i].ln_2.weight = fetch_layer_weights<1>(j, addr, i, "ln_2.weight");
     m.h[i].mlp_c_fc_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_fc.bias");
-    m.h[i].mlp_c_fc_weight = fetch_layer_weights<2>(j, addr, i, "mlp.c_fc.weight");
+    m.h[i].mlp_c_fc_weight = fetch_layer_weights<2>(j, addr, i, "mlp.c_fc.weight").TransposedCopy();
     m.h[i].mlp_c_proj_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_proj.bias");
-    m.h[i].mlp_c_proj_weight = fetch_layer_weights<2>(j, addr, i, "mlp.c_proj.weight");
+    m.h[i].mlp_c_proj_weight = fetch_layer_weights<2>(j, addr, i, "mlp.c_proj.weight").TransposedCopy();
   }
 
   // tokenize("The rain in spain falls mainly on the")
@@ -277,10 +349,12 @@ int main() {
       }
     }
     auto qkvbuf = NewMatrix(N, 3*m.embedding_dim);
+    // TODO: transpose attnbuf
     auto attnbuf = NewMatrix(N, m.h[0].attn.num_heads);
     auto xbuf = NewMatrix(N, m.embedding_dim);
     auto hbuf = NewMatrix(N, 4*m.embedding_dim);
     auto ybuf = NewMatrix(N, m.embedding_dim);
+    auto logits = NewVector(m.ntokens);
 
     for (int l = 0; l < 12; l++) {
       // transformer blocks
@@ -294,15 +368,17 @@ int main() {
         for (int k = 0; k < 3*m.embedding_dim; k++) {
           qkvbuf(i, k) = m.h[l].attn.c_attn_bias[k];
         }
-        for (int j = 0; j < m.embedding_dim; j++) {
-          float x = xbuf(i, j);
-          for (int k = 0; k < 3*m.embedding_dim; k++) {
-            qkvbuf(i, k) += x * m.h[l].attn.c_attn_weight(j, k);
-          }
+        float *w = m.h[l].attn.c_attn_weight.data;
+        float *x = xbuf.data + i*m.embedding_dim;
+        for (int k = 0; k < 3*m.embedding_dim; k++) {
+          qkvbuf(i, k) += dot(x, w, m.embedding_dim);
+          w += m.embedding_dim;
         }
       }
-      printf("qkvbuf(%d):\n", l);
-      qkvbuf.show();
+      /*
+        printf("qkvbuf(%d):\n", l);
+        qkvbuf.show();
+      */
 
       // at this point, illustrating with 3 attention heads, qkvbuf looks like
       //        h1 h2 h3 h1 h2 h3 h1 h2 h3
@@ -315,77 +391,108 @@ int main() {
       int qoff = 0;
       attnbuf.zero();
       for (int i = 0; i < N; i++) {
+
+        // for generation, we don't need to compute the full attention matrix
+        // for the last block, but it uses information from all previous tokens
+        // & blocks.
+        if (l == 11 && i < N-1) continue;
+
         for (int j = 0; j <= i; j++) {
-          int qoff = 0;
-          int koff = m.embedding_dim;
+          float *qk = qkvbuf.data + i*3*m.embedding_dim;
+          float *vk = qkvbuf.data + j*3*m.embedding_dim + m.embedding_dim;
           for (int h = 0; h < num_heads; h++) {
-            float sum = 0;
-            for (int k = 0; k < head_siz; k++) {
-              float qk = qkvbuf(i, qoff++);
-              float vk = qkvbuf(j, koff++);
-              sum += qk * vk;
-            }
-            attnbuf(j, h) = exp(sum * attn_scale);
+            attnbuf(j, h) = dot(qk, vk, head_siz) * attn_scale;
+            qk += head_siz;
+            vk += head_siz;
           }
         }
         // softmax
         for (int h = 0; h < num_heads; h++) {
+          float max = -1e20;
           float denom = 0;
           for (int j = 0; j <= i; j++) {
-            denom += attnbuf(j, h);
+            float a = attnbuf(j, h);
+            if (a > max) {
+              max = a;
+            }
           }
-          denom = 1.0 / denom;
           for (int j = 0; j <= i; j++) {
-            attnbuf(j, h) *= denom;
+            float a = exp(attnbuf(j, h) - max);
+            denom += a;
+            attnbuf(j, h) = a;
+          }
+          float scale = 1.0 / denom;
+          for (int j = 0; j <= i; j++) {
+            attnbuf(j, h) *= scale;
           }
         }
         // finally accumulate attention @ values -> ybuf
         for (int j = 0; j <= i; j++) {
+          float *y = ybuf.data + i*m.embedding_dim;
           int voff = m.embedding_dim*2;
-          int yoff = 0;
+          float *v = qkvbuf.data + j*3*m.embedding_dim + voff;
+          float *a = attnbuf.data + j*num_heads;
           for (int h = 0; h < num_heads; h++) {
-            float a = attnbuf(j, h);
-            for (int k = 0; k < head_siz; k++) {
-              float vk = qkvbuf(j, voff++);
-              ybuf(i, yoff++) += a * vk;
-            }
+            saxpy(head_siz, *a++, v, y);
+            v += head_siz;
+            y += head_siz;
           }
         }
         // matmul the projection and sum into input
         for (int j = 0; j < m.embedding_dim; j++) {
-          float sum = m.h[l].attn.c_proj_bias[j];
-          for (int k = 0; k < m.embedding_dim; k++) {
-            // would be better to transpose the weight matrix
-            sum += ybuf(i, k) * m.h[l].attn.c_proj_weight(k, j);
-          }
+          float *y = ybuf.data + i*m.embedding_dim;
+          float *w = m.h[l].attn.c_proj_weight.data + j*m.embedding_dim;
+          float sum = m.h[l].attn.c_proj_bias[j] + dot(y, w, m.embedding_dim);
           input(i, j) += sum;
         }
 
         // fc part of block
         m.h[l].ln_2.apply(xbuf.row(i), input.row(i));
         int hidden_dim = 4*m.embedding_dim;
+        float *fc_w = m.h[l].mlp_c_fc_weight.data;
         for (int j = 0; j < hidden_dim; j++) {
-          float sum = m.h[l].mlp_c_fc_bias[j];
-          for (int k = 0; k < m.embedding_dim; k++) {
-            sum += xbuf(i, k) * m.h[l].mlp_c_fc_weight(k, j);
-          }
+          float *x = xbuf.data + i*m.embedding_dim;
+          float sum = m.h[l].mlp_c_fc_bias[j] + dot(x, fc_w, m.embedding_dim);
+          fc_w += m.embedding_dim;
           float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
           hbuf(i, j) = gelu;
         }
         // matmul the projection and sum into input
+        float *proj_w = m.h[l].mlp_c_proj_weight.data;
         for (int j = 0; j < m.embedding_dim; j++) {
-          float sum = m.h[l].mlp_c_proj_bias[j];
-          for (int k = 0; k < hidden_dim; k++) {
-            sum += hbuf(i, k) * m.h[l].mlp_c_proj_weight(k, j);
-          }
+          float *h = hbuf.data + i*hidden_dim;
+          float sum = m.h[l].mlp_c_proj_bias[j] + dot(h, proj_w, hidden_dim);
+          proj_w += hidden_dim;
           input(i, j) += sum;
         }
       }
       printf("x(%d):\n", l);
-      input.show();
+      input.row(N-1).show();
+    }
+
+    // finally, layernorm and dot with embedding matrix
+    for (int i = N-1; i < N; i++) {
+      m.ln_f.apply(ybuf.row(i), input.row(i));
+      float *w = m.wte_weight.data;
+      int largmax = 0;
+      for (int j = 0; j < m.ntokens; j++) {
+        logits[j] = dot(ybuf.row(i).data, w, m.embedding_dim);
+        w += m.embedding_dim;
+        if (logits[j] > logits[largmax]) {
+          largmax = j;
+        }
+      }
+      printf("logits: "); logits.show();
+      printf("argmax: %d (%f)\n", largmax, logits[largmax]);
+      printf("logits[198]: %f\n", logits[198]);
     }
 
     qkvbuf.destroy();
+    attnbuf.destroy();
+    xbuf.destroy();
+    hbuf.destroy();
+    ybuf.destroy();
     input.destroy();
   }
+  printf("expected result: x tensor([-3.4188, -1.0318, -3.5397,  5.2943,  3.9251, -2.0164, -2.1934, -2.5857, 0.5539, -4.0938])\n");
 }
