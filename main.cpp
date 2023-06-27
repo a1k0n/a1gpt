@@ -26,6 +26,7 @@ template <int N> struct Tensorf {
       for (int i = 0; i < k; i++) {
         printf("%f ", data[i]);
       }
+      printf("\n");
     } else if (N == 2) {
       int ki = 10;
       int kj = 10;
@@ -147,12 +148,7 @@ struct LayerNorm {
   Tensorf<1> bias;
   Tensorf<1> weight;
 
-  void operator()(const Tensorf<1> &buf) {
-    // in-place version is the same
-    return (*this)(buf, buf);
-  }
-
-  void operator()(const Tensorf<1> &out, const Tensorf<1> &in) {
+  void apply(const Tensorf<1> &out, const Tensorf<1> &in) {
     float sum1 = 0;
     float sum2 = 0;
     for (int i = 0; i < in.shape[0]; i++) {
@@ -282,11 +278,16 @@ int main() {
     }
     auto qkvbuf = NewMatrix(N, 3*m.embedding_dim);
     auto attnbuf = NewMatrix(N, m.h[0].attn.num_heads);
+    auto xbuf = NewMatrix(N, m.embedding_dim);
+    auto hbuf = NewMatrix(N, 4*m.embedding_dim);
+    auto ybuf = NewMatrix(N, m.embedding_dim);
+
     for (int l = 0; l < 12; l++) {
       // transformer blocks
+      ybuf.zero();
       for (int i = 0; i < N; i++) {
         // layernorm
-        m.h[l].ln_1(input.row(i));
+        m.h[l].ln_1.apply(xbuf.row(i), input.row(i));
         // self-attention
         // matmul into qkvbuf; noting that weights are transposed
         // so we sum each input entry into the qkv buf
@@ -294,13 +295,13 @@ int main() {
           qkvbuf(i, k) = m.h[l].attn.c_attn_bias[k];
         }
         for (int j = 0; j < m.embedding_dim; j++) {
-          float x = input(i, j);
+          float x = xbuf(i, j);
           for (int k = 0; k < 3*m.embedding_dim; k++) {
             qkvbuf(i, k) += x * m.h[l].attn.c_attn_weight(j, k);
           }
         }
       }
-      printf("qkvbuf:\n");
+      printf("qkvbuf(%d):\n", l);
       qkvbuf.show();
 
       // at this point, illustrating with 3 attention heads, qkvbuf looks like
@@ -317,24 +318,72 @@ int main() {
         for (int j = 0; j <= i; j++) {
           int qoff = 0;
           int koff = m.embedding_dim;
-          for (int h = 0; h < m.h[l].attn.num_heads; h++) {
+          for (int h = 0; h < num_heads; h++) {
             float sum = 0;
             for (int k = 0; k < head_siz; k++) {
               float qk = qkvbuf(i, qoff++);
               float vk = qkvbuf(j, koff++);
               sum += qk * vk;
             }
-            attnbuf(j, h) = sum * attn_scale;
+            attnbuf(j, h) = exp(sum * attn_scale);
           }
         }
-        printf("attn %d:\n", i);
-        attnbuf.show();
-      }
+        // softmax
+        for (int h = 0; h < num_heads; h++) {
+          float denom = 0;
+          for (int j = 0; j <= i; j++) {
+            denom += attnbuf(j, h);
+          }
+          denom = 1.0 / denom;
+          for (int j = 0; j <= i; j++) {
+            attnbuf(j, h) *= denom;
+          }
+        }
+        // finally accumulate attention @ values -> ybuf
+        for (int j = 0; j <= i; j++) {
+          int voff = m.embedding_dim*2;
+          int yoff = 0;
+          for (int h = 0; h < num_heads; h++) {
+            float a = attnbuf(j, h);
+            for (int k = 0; k < head_siz; k++) {
+              float vk = qkvbuf(j, voff++);
+              ybuf(i, yoff++) += a * vk;
+            }
+          }
+        }
+        // matmul the projection and sum into input
+        for (int j = 0; j < m.embedding_dim; j++) {
+          float sum = m.h[l].attn.c_proj_bias[j];
+          for (int k = 0; k < m.embedding_dim; k++) {
+            // would be better to transpose the weight matrix
+            sum += ybuf(i, k) * m.h[l].attn.c_proj_weight(k, j);
+          }
+          input(i, j) += sum;
+        }
 
-      break;
+        // fc part of block
+        m.h[l].ln_2.apply(xbuf.row(i), input.row(i));
+        int hidden_dim = 4*m.embedding_dim;
+        for (int j = 0; j < hidden_dim; j++) {
+          float sum = m.h[l].mlp_c_fc_bias[j];
+          for (int k = 0; k < m.embedding_dim; k++) {
+            sum += xbuf(i, k) * m.h[l].mlp_c_fc_weight(k, j);
+          }
+          float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
+          hbuf(i, j) = gelu;
+        }
+        // matmul the projection and sum into input
+        for (int j = 0; j < m.embedding_dim; j++) {
+          float sum = m.h[l].mlp_c_proj_bias[j];
+          for (int k = 0; k < hidden_dim; k++) {
+            sum += hbuf(i, k) * m.h[l].mlp_c_proj_weight(k, j);
+          }
+          input(i, j) += sum;
+        }
+      }
+      printf("x(%d):\n", l);
+      input.show();
     }
-    printf("x:\n");
-    input.show();
 
     qkvbuf.destroy();
     input.destroy();
