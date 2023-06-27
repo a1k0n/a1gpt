@@ -11,6 +11,9 @@
 
 #include <nlohmann/json.hpp>
 
+// for benchmarking
+const int NLOOPS = 10;
+
 /*
 extern float* gpuTransferFloats(float *data, int size);
 extern void gpuDumpMemoryInfo();
@@ -19,6 +22,40 @@ extern void gpuDumpMemoryInfo();
 template <int N> struct Tensorf {
   int shape[N];
   float *data;
+  float *alloc;
+
+  Tensorf() {
+    alloc = NULL;
+  }
+
+  Tensorf(int i) {
+    shape[0] = i;
+    // allocate aligned float array
+    alloc = new float[i + 7];
+    data = (float *)(((uintptr_t)alloc + 31) & ~31);
+  }
+
+  Tensorf(int i, int j) {
+    shape[0] = i;
+    shape[1] = j;
+    // allocate aligned float array
+    alloc = new float[i * j + 7];
+    data = (float *)(((uintptr_t)alloc + 31) & ~31);
+  }
+
+  Tensorf(const Tensorf<N> &other) {
+    for (int i = 0; i < N; i++) {
+      shape[i] = other.shape[i];
+    }
+    data = other.data;
+    alloc = other.alloc;
+  }
+
+  ~Tensorf() {
+    if (alloc) {
+      delete[] alloc;
+    }
+  }
 
   void show() {
     if (N == 1) {
@@ -69,9 +106,12 @@ template <int N> struct Tensorf {
       fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", i, shape[N-2]);
       abort();
     }
+    // return new tensor with no alloc, so it won't destroy the underlying array
+    // when it goes out of scope
     Tensorf<N-1> out;
     out.shape[0] = shape[1];
     out.data = data + i * shape[1];
+    out.alloc = NULL;
     return out;
   }
 
@@ -92,7 +132,6 @@ template <int N> struct Tensorf {
   }
 
   Tensorf<N>& operator+=(const Tensorf<N> &other) {
-    Tensorf<N> out;
     int size = 1;
     for (int i = 0; i < N; i++) {
       if (shape[i] != other.shape[i]) {
@@ -123,34 +162,20 @@ template <int N> struct Tensorf {
     delete[] data;
   }
 
-  Tensorf<2> TransposedCopy() {
-    Tensorf<2> out;
-    out.shape[0] = shape[1];
-    out.shape[1] = shape[0];
-    out.data = new float[out.shape[0] * out.shape[1]];
-    for (int i = 0; i < shape[0]; i++) {
-      for (int j = 0; j < shape[1]; j++) {
-        out(j, i) = (*this)(i, j);
+  Tensorf<2> *TransposedCopy() {
+    int m = shape[1], n = shape[0];
+    Tensorf<2> *out = new Tensorf<2>(m, n);
+    float *dout = out->data;
+    for (int j = 0; j < m; j++) {
+      float *din = data + j;
+      for (int i = 0; i < n; i++) {
+        *dout++ = *din;
+        din += m;
       }
     }
     return out;
   }
 };
-
-Tensorf<2> NewMatrix(int i, int j) {
-  Tensorf<2> out;
-  out.shape[0] = i;
-  out.shape[1] = j;
-  out.data = new float[i * j];
-  return out;
-}
-
-Tensorf<1> NewVector(int n) {
-  Tensorf<1> out;
-  out.shape[0] = n;
-  out.data = new float[n];
-  return out;
-}
 
 struct CausalSelfAttention {
   int num_heads;
@@ -246,8 +271,8 @@ static float dot(float *a, float *b, int n) {
   float sum = 0;
   if (n > 7) {
     __m256 sum8 = _mm256_setzero_ps(); // accumulate in a vector
-    int n8 = n/8;
-    for (; i < n8*8; i += 8) {
+    int n8 = n&(~7);
+    for (; i < n8; i += 8) {
       __m256 a8 = _mm256_loadu_ps(a + i);
       __m256 b8 = _mm256_loadu_ps(b + i);
       __m256 prod = _mm256_mul_ps(a8, b8);
@@ -291,6 +316,10 @@ static void saxpy(int n, float a, float * const x, float *y) {
 int main() {
   // mmap "model.safetensors" into memory
   int fd = open("model.safetensors", O_RDONLY);
+  if (fd < 0) {
+    fprintf(stderr, "Failed to open model.safetensors\n");
+    exit(1);
+  }
   struct stat sb;
   fstat(fd, &sb);
   char *addr = (char*) mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -323,24 +352,29 @@ int main() {
   for (int i = 0; i < 12; i++) {
     m.h[i].attn.num_heads = 12;
     m.h[i].attn.c_attn_bias = fetch_layer_weights<1>(j, addr, i, "attn.c_attn.bias");
-    m.h[i].attn.c_attn_weight = fetch_layer_weights<2>(j, addr, i, "attn.c_attn.weight").TransposedCopy();
+    m.h[i].attn.c_attn_weight = *fetch_layer_weights<2>(j, addr, i, "attn.c_attn.weight").TransposedCopy();
     m.h[i].attn.c_proj_bias = fetch_layer_weights<1>(j, addr, i, "attn.c_proj.bias");
-    m.h[i].attn.c_proj_weight = fetch_layer_weights<2>(j, addr, i, "attn.c_proj.weight").TransposedCopy();
+    m.h[i].attn.c_proj_weight = *fetch_layer_weights<2>(j, addr, i, "attn.c_proj.weight").TransposedCopy();
     m.h[i].ln_1.bias = fetch_layer_weights<1>(j, addr, i, "ln_1.bias");
     m.h[i].ln_1.weight = fetch_layer_weights<1>(j, addr, i, "ln_1.weight");
     m.h[i].ln_2.bias = fetch_layer_weights<1>(j, addr, i, "ln_2.bias");
     m.h[i].ln_2.weight = fetch_layer_weights<1>(j, addr, i, "ln_2.weight");
     m.h[i].mlp_c_fc_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_fc.bias");
-    m.h[i].mlp_c_fc_weight = fetch_layer_weights<2>(j, addr, i, "mlp.c_fc.weight").TransposedCopy();
+    m.h[i].mlp_c_fc_weight = *fetch_layer_weights<2>(j, addr, i, "mlp.c_fc.weight").TransposedCopy();
     m.h[i].mlp_c_proj_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_proj.bias");
-    m.h[i].mlp_c_proj_weight = fetch_layer_weights<2>(j, addr, i, "mlp.c_proj.weight").TransposedCopy();
+    m.h[i].mlp_c_proj_weight = *fetch_layer_weights<2>(j, addr, i, "mlp.c_proj.weight").TransposedCopy();
   }
 
   // tokenize("The rain in spain falls mainly on the")
-  {
+  // benchmark 100 iterations
+  // get t0 first
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+
+  for (int iter = 0; iter < NLOOPS; iter++) {
     const int N = 9;
     int test_vector[N] = {464, 6290,  287,  599,  391, 8953, 8384,  319,  262};
-    auto input = NewMatrix(N, m.embedding_dim);
+    Tensorf<2> input(N, m.embedding_dim);
     for (int i = 0; i < N; i++) {
       float sum1 = 0;
       float sum2 = 0;
@@ -348,13 +382,13 @@ int main() {
         input(i, j) = m.wte_weight(test_vector[i], j) + m.wpe_weight(i, j);
       }
     }
-    auto qkvbuf = NewMatrix(N, 3*m.embedding_dim);
+    Tensorf<2> qkvbuf(N, 3*m.embedding_dim);
     // TODO: transpose attnbuf
-    auto attnbuf = NewMatrix(N, m.h[0].attn.num_heads);
-    auto xbuf = NewMatrix(N, m.embedding_dim);
-    auto hbuf = NewMatrix(N, 4*m.embedding_dim);
-    auto ybuf = NewMatrix(N, m.embedding_dim);
-    auto logits = NewVector(m.ntokens);
+    Tensorf<2> attnbuf(N, m.h[0].attn.num_heads);
+    Tensorf<2> xbuf(N, m.embedding_dim);
+    Tensorf<2> hbuf(N, 4*m.embedding_dim);
+    Tensorf<2> ybuf(N, m.embedding_dim);
+    Tensorf<1> logits(m.ntokens);
 
     for (int l = 0; l < 12; l++) {
       // transformer blocks
@@ -486,13 +520,10 @@ int main() {
       printf("argmax: %d (%f)\n", largmax, logits[largmax]);
       printf("logits[198]: %f\n", logits[198]);
     }
-
-    qkvbuf.destroy();
-    attnbuf.destroy();
-    xbuf.destroy();
-    hbuf.destroy();
-    ybuf.destroy();
-    input.destroy();
   }
   printf("expected result: x tensor([-3.4188, -1.0318, -3.5397,  5.2943,  3.9251, -2.0164, -2.1934, -2.5857, 0.5539, -4.0938])\n");
+
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+  printf("elapsed: %f, %f/loop\n", elapsed, elapsed/NLOOPS);
 }

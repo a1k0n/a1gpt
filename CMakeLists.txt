@@ -1,6 +1,6 @@
 # Set minimum version of CMake. Version 3.8 introduces CUDA as a first-class language
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
-project(my_project LANGUAGES CXX CUDA)
+project(my_project LANGUAGES CXX) # CUDA)
 
 include(FetchContent)
 
@@ -21,13 +21,13 @@ endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx")
 
 # Add executable target with source files
-add_executable(thingy main.cpp kernel.cu)
+add_executable(thingy main.cpp) # kernel.cu)
 target_include_directories(thingy PRIVATE ${CUDA_INCLUDE_DIRS})
 target_link_libraries(thingy PRIVATE nlohmann_json::nlohmann_json)
 
 # Specify the C++ standard
 set_target_properties(thingy PROPERTIES
-                      CUDA_SEPARABLE_COMPILATION ON
+  #                      CUDA_SEPARABLE_COMPILATION ON
                       CXX_STANDARD 14
                       CXX_STANDARD_REQUIRED TRUE)
 
