@@ -21,7 +21,10 @@ endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 
 # Add executable target with source files
-add_executable(thingy main.cpp) # kernel.cu)
+add_executable(thingy main.cpp
+ bpe.h bpe.cpp)
+  # kernel.cu)
+
 target_include_directories(thingy PRIVATE ${CUDA_INCLUDE_DIRS})
 target_link_libraries(thingy PRIVATE nlohmann_json::nlohmann_json)
 

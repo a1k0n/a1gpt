@@ -12,6 +12,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "bpe.h"
+
 /*
 extern float* gpuTransferFloats(float *data, int size);
 extern void gpuDumpMemoryInfo();
@@ -336,6 +338,12 @@ int main() {
   char *addr = (char*) mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   uint64_t header_len = *((uint64_t *)addr);
 
+  BPEDecoder decoder;
+  if (!decoder.Init("vocab.bin")) {
+    fprintf(stderr, "Failed to init decoder from vocab.bin\n");
+    exit(1);
+  }
+
   std::string header(addr + sizeof(uint64_t), header_len);
   nlohmann::json j;
   try {
@@ -385,6 +393,11 @@ int main() {
   {
     const int N = 9;
     int test_vector[N] = {464, 6290,  287,  599,  391, 8953, 8384,  319,  262};
+    {
+      char buf[256];
+      decoder.Decode(test_vector, N, buf, 256);
+      printf("decoded test vector: %s\n", buf);
+    }
     Tensorf<2> input(N, m.embedding_dim);
     for (int i = 0; i < N; i++) {
       float sum1 = 0;
@@ -533,8 +546,7 @@ int main() {
         }
       }
       printf("logits: "); logits.show();
-      printf("argmax: %d (%f)\n", largmax, logits[largmax]);
-      printf("logits[198]: %f\n", logits[198]);
+      printf("argmax: %d (%s) = %f\n", largmax, decoder.vocab_[largmax].c_str(), logits[largmax]);
     }
   }
   printf("expected result: x tensor([-3.4188, -1.0318, -3.5397,  5.2943,  3.9251, -2.0164, -2.1934, -2.5857, 0.5539, -4.0938])\n");
