@@ -27,14 +27,110 @@ struct CausalSelfAttention {
   // adds self-attention(x, kvbuf) to x at token index i
   // kvbuf is a buffer of shape <tokens, 2*embedding_dim>
   // (modifies kvbuf[i], reads kvbuf[:i-1])
-  void apply(Tensorf<1> &x, Tensorf<2> &kvbuf, int i);
+  void apply(const Tensorf<1> &out, const Tensorf<1> &xbuf, const Tensorf<2> &kvbuf, int i) {
+    int emb_siz = xbuf.shape[0];
+    Tensorf<2> attnbuf(i+1, num_heads);
+    Tensorf<1> qbuf(emb_siz);
+    Tensorf<1> ybuf(emb_siz);
+
+    int head_siz = emb_siz / num_heads;
+    float attn_scale = 1.0 / sqrt(head_siz);
+    // first compute q, kv[i]
+
+    {
+      // matmul into q/kv; kv is cached for future invocations so write our
+      // entry in there
+      float *w = c_attn_weight.data;
+      float *x = xbuf.data;
+      float *b = c_attn_bias.data;
+      float *q = qbuf.data;
+      // matmul q = Qx
+      for (int k = 0; k < emb_siz; k++) {
+        *q++ = (*b++) + sdot(x, w, emb_siz);
+        w += emb_siz;
+      }
+      // kv[i] = KVx
+      float *kv = &kvbuf(i, 0);
+      for (int k = 0; k < 2 * emb_siz; k++) {
+        *kv++ = (*b++) + sdot(x, w, emb_siz);
+        w += emb_siz;
+      }
+    }
+
+    {
+      float *att = attnbuf.data;
+      for (int j = 0; j <= i; j++) {
+        float *qk = qbuf.data;
+        float *kk = &kvbuf(j, 0);
+        for (int h = 0; h < num_heads; h++) {
+          *att++ = sdot(qk, kk, head_siz) * attn_scale;
+          qk += head_siz;
+          kk += head_siz;
+        }
+      }
+    }
+
+    // att = softmax(att)
+    for (int h = 0; h < num_heads; h++) {
+      float max = -1e20;
+      float denom = 0;
+      float *att = attnbuf.data + h;
+      for (int j = 0; j <= i; j++) {
+        float a = *att;
+        att += num_heads;
+        if (a > max) {
+          max = a;
+        }
+      }
+      att = attnbuf.data + h;
+      for (int j = 0; j <= i; j++) {
+        float a = exp(*att - max);
+        denom += a;
+        *att = a;
+        att += num_heads;
+      }
+      float scale = 1.0 / denom;
+      att = attnbuf.data + h;
+      for (int j = 0; j <= i; j++) {
+        *att *= scale;
+        att += num_heads;
+      }
+    }
+
+    // finally accumulate attention @ values -> ybuf
+    {
+      ybuf.zero();
+      float *att = attnbuf.data;
+      for (int j = 0; j <= i; j++) {
+        float *y = ybuf.data;
+        float *v = &kvbuf(j, emb_siz); // pick out the value vector from the key-value buf
+        for (int h = 0; h < num_heads; h++) {
+          saxpy(head_siz, *att++, v, y);
+          v += head_siz;
+          y += head_siz;
+        }
+      }
+    }
+
+    // matmul the projection and sum into input
+    // input += c_proj_weight @ ybuf + c_proj_bias
+    {
+      float *w = c_proj_weight.data;
+      float *y = ybuf.data;
+      float *o = out.data;
+      for (int j = 0; j < emb_siz; j++) {
+        *o++ += c_proj_bias[j] + sdot(y, w, emb_siz);
+        w += emb_siz;
+      }
+    }
+  }
 };
 
 struct LayerNorm {
   Tensorf<1> bias;
   Tensorf<1> weight;
 
-  void apply(const Tensorf<1> &out, const Tensorf<1> &in) {
+  void apply(Tensorf<1> &out, const Tensorf<1> &in) {
     float sum1 = 0;
     float sum2 = 0;
     float *i = in.data;
@@ -60,18 +156,59 @@ struct LayerNorm {
   }
 };
 
+struct MLPBlock {
+  // two-layer MLP
+  Tensorf<1> c_fc_bias;
+  Tensorf<2> c_fc_weight;
+  Tensorf<1> c_proj_bias;
+  Tensorf<2> c_proj_weight;
+
+  // x += proj(gelu(fc(x)))
+  void apply(const Tensorf<1> &out, const Tensorf<1> &in) {
+    int hidden_dim = c_fc_bias.shape[0];
+    Tensorf<1> hbuf(hidden_dim);
+    // fc part of block
+    // input += mlp_c_proj_weight @ gelu(mlp_c_fc_weight @ xbuf + mlp_c_fc_bias) + mlp_c_proj_bias
+    {
+      float *fc_w = c_fc_weight.data;
+      float *x = in.data;
+      float *h = hbuf.data;
+      for (int j = 0; j < hidden_dim; j++) {
+        float sum = c_fc_bias[j] + sdot(x, fc_w, in.shape[0]);
+        float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
+        *h++ = gelu;
+        fc_w += in.shape[0];
+      }
+    }
+    // matmul the projection and sum into input
+    {
+      float *proj_w = c_proj_weight.data;
+      float *o = out.data;
+      float *h = hbuf.data;
+      for (int j = 0; j < in.shape[0]; j++) {
+        float sum = c_proj_bias[j] + sdot(h, proj_w, hidden_dim);
+        *o++ += sum;
+        proj_w += hidden_dim;
+      }
+    }
+  }
+};
+
 struct TransformerBlock {
   // combined key, query, value
   CausalSelfAttention attn;
   LayerNorm ln_1, ln_2;
-  Tensorf<1> mlp_c_fc_bias;
-  Tensorf<2> mlp_c_fc_weight;
-  Tensorf<1> mlp_c_proj_bias;
-  Tensorf<2> mlp_c_proj_weight;
+  MLPBlock mlp;
 
-  // x += attn(ln_1(x), kvbuf, i)
-  // x += proj(gelu(fc(ln_2(x))))
-  void apply(Tensorf<1> &x, Tensorf<2> &kvbuf, int i);
+  void apply(const Tensorf<1> &x, const Tensorf<2> &kvbuf, int i) {
+    Tensorf<1> xbuf(x.shape[0]);
+    // x += attn(ln_1(x), kvbuf, i)
+    ln_1.apply(xbuf, x);
+    attn.apply(x, xbuf, kvbuf, i);
+    // x += proj(gelu(fc(ln_2(x))))
+    ln_2.apply(xbuf, x);
+    mlp.apply(x, xbuf);
+  }
 };
 
 struct Model {
@@ -173,10 +310,10 @@ int main() {
     m.h[i].ln_1.weight = fetch_layer_weights<1>(j, addr, i, "ln_1.weight");
     m.h[i].ln_2.bias = fetch_layer_weights<1>(j, addr, i, "ln_2.bias");
     m.h[i].ln_2.weight = fetch_layer_weights<1>(j, addr, i, "ln_2.weight");
-    m.h[i].mlp_c_fc_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_fc.bias");
-    m.h[i].mlp_c_fc_weight = *fetch_layer_weights<2>(j, addr, i, "mlp.c_fc.weight").TransposedCopy();
-    m.h[i].mlp_c_proj_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_proj.bias");
-    m.h[i].mlp_c_proj_weight = *fetch_layer_weights<2>(j, addr, i, "mlp.c_proj.weight").TransposedCopy();
+    m.h[i].mlp.c_fc_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_fc.bias");
+    m.h[i].mlp.c_fc_weight = *fetch_layer_weights<2>(j, addr, i, "mlp.c_fc.weight").TransposedCopy();
+    m.h[i].mlp.c_proj_bias = fetch_layer_weights<1>(j, addr, i, "mlp.c_proj.bias");
+    m.h[i].mlp.c_proj_weight = *fetch_layer_weights<2>(j, addr, i, "mlp.c_proj.weight").TransposedCopy();
   }
 
   // tokenize("The rain in spain falls mainly on the")
@@ -194,6 +331,8 @@ int main() {
       printf("decoded test vector: %s\n", buf);
     }
     Tensorf<2> input(N, m.embedding_dim);
+    Tensorf<3> kvbuf(12, N, 2*m.embedding_dim);
+
     for (int i = 0; i < N; i++) {
       float sum1 = 0;
       float sum2 = 0;
@@ -201,168 +340,36 @@ int main() {
         input(i, j) = m.wte_weight(test_vector[i], j) + m.wpe_weight(i, j);
       }
     }
-    // query buf (reused for each layer)
-    Tensorf<2> qbuf(N, m.embedding_dim);
-    // per-layer key-value buf (retained between subsequent tokens)
-    Tensorf<3> kvbuf(12, N, 2*m.embedding_dim);
-    // TODO: transpose attnbuf
-    Tensorf<2> attnbuf(N, m.h[0].attn.num_heads);
-    Tensorf<2> xbuf(N, m.embedding_dim);
-    Tensorf<2> hbuf(N, 4*m.embedding_dim);
-    Tensorf<2> ybuf(N, m.embedding_dim);
+
     Tensorf<1> logits(m.ntokens);
 
-    for (int l = 0; l < 12; l++) {
-      // transformer blocks
-      ybuf.zero();
-      Tensorf<2> lkvbuf = kvbuf.slice(l);
-      for (int i = 0; i < N; i++) {
-        // layernorm
-        m.h[l].ln_1.apply(xbuf.slice(i), input.slice(i));
-        // self-attention
-        // matmul into qkvbuf; noting that weights are transposed
-        // so we sum each input entry into the qkv buf
-        float *w = m.h[l].attn.c_attn_weight.data;
-        float *x = xbuf.data + i*m.embedding_dim;
-        float *b = m.h[l].attn.c_attn_bias.data;
-        for (int k = 0; k < m.embedding_dim; k++) {
-          qbuf(i, k) = (*b++) + sdot(x, w, m.embedding_dim);
-          w += m.embedding_dim;
-        }
-        for (int k = 0; k < 2*m.embedding_dim; k++) {
-          lkvbuf(i, k) = (*b++) + sdot(x, w, m.embedding_dim);
-          w += m.embedding_dim;
-        }
+    for (int j = 0; j < N; j++) {
+      auto input_j = input.slice(j);
+      for (int l = 0; l < 12; l++) {
+        printf("--- layer %d ---\n", l);
+        m.h[l].apply(input_j, kvbuf.slice(l), j);
+        printf("x(token=%d, layer=%d):\n", j, l); input_j.show();
       }
-      /*
-        printf("qkvbuf(%d):\n", l);
-        qkvbuf.show();
-      */
-
-      // at this point, illustrating with 3 attention heads, qkvbuf looks like
-      //        h1 h2 h3 h1 h2 h3 h1 h2 h3
-      // token0 q1 q2 q3 k1 k2 k3 v1 v2 v3
-      // token1 q2 q2 q3 k1 k2 k3 v1 v2 v3
-
-      int num_heads = m.h[l].attn.num_heads;
-      int head_siz = m.embedding_dim / num_heads;
-      float attn_scale = 1.0 / sqrt(head_siz);
-      int qoff = 0;
-      //attnbuf.zero();
-      for (int i = 0; i < N; i++) {
-        // for generation, we don't need to compute the full attention matrix
-        // for the last block, but it uses information from all previous tokens
-        // & blocks.
-        if (l == 11 && i < N-1) continue;
-
-        {
-          float *att = attnbuf.data;
-          for (int j = 0; j <= i; j++) {
-            float *qk = qbuf.data + i*m.embedding_dim;
-            float *kk = lkvbuf.data + j*2*m.embedding_dim;
-            for (int h = 0; h < num_heads; h++) {
-              *att++ = sdot(qk, kk, head_siz) * attn_scale;
-              qk += head_siz;
-              kk += head_siz;
-            }
-          }
-        }
-        // softmax
-        for (int h = 0; h < num_heads; h++) {
-          float max = -1e20;
-          float denom = 0;
-          float *att = attnbuf.data + h;
-          for (int j = 0; j <= i; j++) {
-            float a = *att;
-            att += num_heads;
-            if (a > max) {
-              max = a;
-            }
-          }
-          att = attnbuf.data + h;
-          for (int j = 0; j <= i; j++) {
-            float a = exp(*att - max);
-            denom += a;
-            *att = a;
-            att += num_heads;
-          }
-          float scale = 1.0 / denom;
-          att = attnbuf.data + h;
-          for (int j = 0; j <= i; j++) {
-            *att *= scale;
-            att += num_heads;
-          }
-        }
-        // finally accumulate attention @ values -> ybuf
-        for (int j = 0; j <= i; j++) {
-          float *y = ybuf.data + i*m.embedding_dim;
-          int voff = m.embedding_dim;
-          float *v = lkvbuf.data + j*2*m.embedding_dim + voff;
-          float *a = attnbuf.data + j*num_heads;
-          for (int h = 0; h < num_heads; h++) {
-            saxpy(head_siz, *a++, v, y);
-            v += head_siz;
-            y += head_siz;
-          }
-        }
-        // matmul the projection and sum into input
-        // input += c_proj_weight @ ybuf + c_proj_bias
-        {
-          float *w = m.h[l].attn.c_proj_weight.data;
-          float *y = ybuf.data + i*m.embedding_dim;
-          float *inp = input.data + i*m.embedding_dim;
-          for (int j = 0; j < m.embedding_dim; j++) {
-            *inp++ += m.h[l].attn.c_proj_bias[j] + sdot(y, w, m.embedding_dim);
-            w += m.embedding_dim;
-          }
-        }
-
-        // xbuf = layernorm(input)
-        m.h[l].ln_2.apply(xbuf.slice(i), input.slice(i));
-        // fc part of block
-        // input += mlp_c_proj_weight @ gelu(mlp_c_fc_weight @ xbuf + mlp_c_fc_bias) + mlp_c_proj_bias
-        int hidden_dim = 4*m.embedding_dim;
-        {
-          float *fc_w = m.h[l].mlp_c_fc_weight.data;
-          float *x = xbuf.data + i*m.embedding_dim;
-          float *h = hbuf.data + i*hidden_dim;
-          for (int j = 0; j < hidden_dim; j++) {
-            float sum = m.h[l].mlp_c_fc_bias[j] + sdot(x, fc_w, m.embedding_dim);
-            float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
-            *h++ = gelu;
-            fc_w += m.embedding_dim;
-          }
-        }
-        // matmul the projection and sum into input
-        {
-          float *proj_w = m.h[l].mlp_c_proj_weight.data;
-          float *inp = input.data + i*m.embedding_dim;
-          float *h = hbuf.data + i*hidden_dim;
-          for (int j = 0; j < m.embedding_dim; j++) {
-            float sum = m.h[l].mlp_c_proj_bias[j] + sdot(h, proj_w, hidden_dim);
-            *inp++ += sum;
-            proj_w += hidden_dim;
-          }
-        }
-      }
-      printf("x(%d):\n", l);
-      input.slice(N-1).show();
+      // at this point we could apply lm_head but we only really need it for prediction
     }
 
-    // finally, layernorm and dot with embedding matrix
-    for (int i = N-1; i < N; i++) {
-      m.ln_f.apply(ybuf.slice(i), input.slice(i));
-      float *w = m.wte_weight.data;
-      int largmax = 0;
-      for (int j = 0; j < m.ntokens; j++) {
-        logits[j] = sdot(ybuf.slice(i).data, w, m.embedding_dim);
-        w += m.embedding_dim;
-        if (logits[j] > logits[largmax]) {
-          largmax = j;
+    {
+      Tensorf<1> ybuf(m.embedding_dim);
+      // finally, layernorm and dot with embedding matrix
+      for (int i = N-1; i < N; i++) {
+        m.ln_f.apply(ybuf, input.slice(i));
+        float *w = m.wte_weight.data;
+        int largmax = 0;
+        for (int j = 0; j < m.ntokens; j++) {
+          logits[j] = sdot(ybuf.data, w, m.embedding_dim);
+          w += m.embedding_dim;
+          if (logits[j] > logits[largmax]) {
+            largmax = j;
+          }
         }
+        printf("logits: "); logits.show();
+        printf("argmax: %d (%s) = %f\n", largmax, decoder.vocab_[largmax].c_str(), logits[largmax]);
       }
-      printf("logits: "); logits.show();
-      printf("argmax: %d (%s) = %f\n", largmax, decoder.vocab_[largmax].c_str(), logits[largmax]);
     }
   }
   printf("expected result: x tensor([-3.4188, -1.0318, -3.5397,  5.2943,  3.9251, -2.0164, -2.1934, -2.5857, 0.5539, -4.0938])\n");

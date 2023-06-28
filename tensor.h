@@ -49,7 +49,7 @@ template <int N> struct Tensorf {
     }
   }
 
-  void show() {
+  void show() const {
     if (N == 1) {
       int k = 10;
       if (shape[0] < k) {
