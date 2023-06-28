@@ -23,6 +23,11 @@ struct CausalSelfAttention {
   Tensorf<2> c_attn_weight;
   Tensorf<1> c_proj_bias;
   Tensorf<2> c_proj_weight;
+
+  // adds self-attention(x, kvbuf) to x at token index i
+  // kvbuf is a buffer of shape <tokens, 2*embedding_dim>
+  // (modifies kvbuf[i], reads kvbuf[:i-1])
+  void apply(Tensorf<1> &x, Tensorf<2> &kvbuf, int i);
 };
 
 struct LayerNorm {
@@ -32,17 +37,25 @@ struct LayerNorm {
   void apply(const Tensorf<1> &out, const Tensorf<1> &in) {
     float sum1 = 0;
     float sum2 = 0;
-    for (int i = 0; i < in.shape[0]; i++) {
-      sum1 += in[i];
-      sum2 += in[i] * in[i];
+    float *i = in.data;
+    int n = in.shape[0];
+    for (int j = 0; j < n; j++) {
+      float ij = *i++;
+      sum1 += ij;
+      sum2 += ij*ij;
     }
     // compute mean and variance
     float mean = sum1 / in.shape[0];
     float variance = sum2 / in.shape[0] - mean * mean;
     const float eps = 1e-5; // layernorm default
     float invstddev = 1.0/sqrt(variance + eps);
-    for (int i = 0; i < in.shape[0]; i++) {
-      out[i] = (in[i] - mean) * invstddev * weight[i] + bias[i];
+    float *w = weight.data;
+    float *b = bias.data;
+    float *o = out.data;
+    i = in.data;
+    // could vectorize, but not as performance critical as dot/matmuls
+    for (int j = 0; j < n; j++) {
+      *o++ = ((*i++) - mean) * invstddev * (*w++) + (*b++);
     }
   }
 };
@@ -55,6 +68,10 @@ struct TransformerBlock {
   Tensorf<2> mlp_c_fc_weight;
   Tensorf<1> mlp_c_proj_bias;
   Tensorf<2> mlp_c_proj_weight;
+
+  // x += attn(ln_1(x), kvbuf, i)
+  // x += proj(gelu(fc(ln_2(x))))
+  void apply(Tensorf<1> &x, Tensorf<2> &kvbuf, int i);
 };
 
 struct Model {
@@ -68,6 +85,11 @@ struct Model {
   LayerNorm ln_f;
 
   TransformerBlock *h;
+};
+
+struct ModelState {
+  Tensorf<3> x;      // <layers, tokens up to layers, embedding_dim>
+  Tensorf<3> kvbuf;  // <layers, tokens, 2*embedding_dim>
 };
 
 // TODO: load onto GPU
