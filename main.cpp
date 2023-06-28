@@ -6,6 +6,10 @@
 
 #include <string>
 
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#endif
+
 #ifdef __AVX__
 #include <immintrin.h>
 #endif
@@ -268,18 +272,14 @@ Tensorf<N> fetch_weights(const nlohmann::json &j, void *addr, const char *name) 
 template <int N>
 Tensorf<N> fetch_layer_weights(const nlohmann::json &j, void *addr, int layer, const char *name) {
   char buf[256];
-  sprintf(buf, "h.%d.%s", layer, name);
+  snprintf(buf, sizeof(buf), "h.%d.%s", layer, name);
   return fetch_weights<N>(j, addr, buf);
 }
 
 static float dot(float *a, float *b, int n) {
-#ifndef __AVX__
-  float sum = 0;
-  for (int i = 0; i < n; i++) {
-    sum += a[i] * b[i];
-  }
-  return sum;
-#else // vectorized dot product
+#ifdef __APPLE__
+  return cblas_sdot(n, a, 1, b, 1);
+#elif defined(__AVX__)
   int i = 0;
   float sum = 0;
   if (n > 7) {
@@ -303,15 +303,19 @@ static float dot(float *a, float *b, int n) {
     sum += a[i] * b[i];
   }
   return sum;
+#else
+  float sum = 0;
+  for (int i = 0; i < n; i++) {
+    sum += a[i] * b[i];
+  }
+  return sum;
 #endif
 }
 
 static void saxpy(int n, float a, float * const x, float *y) {
-#ifndef __AVX__
-  for (int i = 0; i < n; i++) {
-    y[i] += a * x[i];
-  }
-#else
+#ifdef __APPLE__
+  cblas_saxpy(n, a, x, 1, y, 1);
+#elif defined(__AVX__)
   // n is assumed to be a multiple of 8 and y is assumed to be aligned
   __m256 a_vec = _mm256_set1_ps(a);
   int i = 0;
@@ -322,6 +326,10 @@ static void saxpy(int n, float a, float * const x, float *y) {
       _mm256_store_ps(y + i, result_vec);
   }
   assert(i == n && "axpy: n is not a multiple of 8");
+#else
+  for (int i = 0; i < n; i++) {
+    y[i] += a * x[i];
+  }
 #endif
 }
 
@@ -460,33 +468,42 @@ int main() {
         // & blocks.
         if (l == 11 && i < N-1) continue;
 
-        for (int j = 0; j <= i; j++) {
-          float *qk = qbuf.data + i*m.embedding_dim;
-          float *kk = lkvbuf.data + j*2*m.embedding_dim;
-          for (int h = 0; h < num_heads; h++) {
-            attnbuf(j, h) = dot(qk, kk, head_siz) * attn_scale;
-            qk += head_siz;
-            kk += head_siz;
+        {
+          float *att = attnbuf.data;
+          for (int j = 0; j <= i; j++) {
+            float *qk = qbuf.data + i*m.embedding_dim;
+            float *kk = lkvbuf.data + j*2*m.embedding_dim;
+            for (int h = 0; h < num_heads; h++) {
+              *att++ = dot(qk, kk, head_siz) * attn_scale;
+              qk += head_siz;
+              kk += head_siz;
+            }
           }
         }
         // softmax
         for (int h = 0; h < num_heads; h++) {
           float max = -1e20;
           float denom = 0;
+          float *att = attnbuf.data + h;
           for (int j = 0; j <= i; j++) {
-            float a = attnbuf(j, h);
+            float a = *att;
+            att += num_heads;
             if (a > max) {
               max = a;
             }
           }
+          att = attnbuf.data + h;
           for (int j = 0; j <= i; j++) {
-            float a = exp(attnbuf(j, h) - max);
+            float a = exp(*att - max);
             denom += a;
-            attnbuf(j, h) = a;
+            *att = a;
+            att += num_heads;
           }
           float scale = 1.0 / denom;
+          att = attnbuf.data + h;
           for (int j = 0; j <= i; j++) {
-            attnbuf(j, h) *= scale;
+            *att *= scale;
+            att += num_heads;
           }
         }
         // finally accumulate attention @ values -> ybuf
@@ -502,31 +519,43 @@ int main() {
           }
         }
         // matmul the projection and sum into input
-        for (int j = 0; j < m.embedding_dim; j++) {
+        // input += c_proj_weight @ ybuf + c_proj_bias
+        {
+          float *w = m.h[l].attn.c_proj_weight.data;
           float *y = ybuf.data + i*m.embedding_dim;
-          float *w = m.h[l].attn.c_proj_weight.data + j*m.embedding_dim;
-          float sum = m.h[l].attn.c_proj_bias[j] + dot(y, w, m.embedding_dim);
-          input(i, j) += sum;
+          float *inp = input.data + i*m.embedding_dim;
+          for (int j = 0; j < m.embedding_dim; j++) {
+            *inp++ += m.h[l].attn.c_proj_bias[j] + dot(y, w, m.embedding_dim);
+            w += m.embedding_dim;
+          }
         }
 
-        // fc part of block
+        // xbuf = layernorm(input)
         m.h[l].ln_2.apply(xbuf.slice(i), input.slice(i));
+        // fc part of block
+        // input += mlp_c_proj_weight @ gelu(mlp_c_fc_weight @ xbuf + mlp_c_fc_bias) + mlp_c_proj_bias
         int hidden_dim = 4*m.embedding_dim;
-        float *fc_w = m.h[l].mlp_c_fc_weight.data;
-        for (int j = 0; j < hidden_dim; j++) {
+        {
+          float *fc_w = m.h[l].mlp_c_fc_weight.data;
           float *x = xbuf.data + i*m.embedding_dim;
-          float sum = m.h[l].mlp_c_fc_bias[j] + dot(x, fc_w, m.embedding_dim);
-          fc_w += m.embedding_dim;
-          float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
-          hbuf(i, j) = gelu;
+          float *h = hbuf.data + i*hidden_dim;
+          for (int j = 0; j < hidden_dim; j++) {
+            float sum = m.h[l].mlp_c_fc_bias[j] + dot(x, fc_w, m.embedding_dim);
+            float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
+            *h++ = gelu;
+            fc_w += m.embedding_dim;
+          }
         }
         // matmul the projection and sum into input
-        float *proj_w = m.h[l].mlp_c_proj_weight.data;
-        for (int j = 0; j < m.embedding_dim; j++) {
+        {
+          float *proj_w = m.h[l].mlp_c_proj_weight.data;
+          float *inp = input.data + i*m.embedding_dim;
           float *h = hbuf.data + i*hidden_dim;
-          float sum = m.h[l].mlp_c_proj_bias[j] + dot(h, proj_w, hidden_dim);
-          proj_w += hidden_dim;
-          input(i, j) += sum;
+          for (int j = 0; j < m.embedding_dim; j++) {
+            float sum = m.h[l].mlp_c_proj_bias[j] + dot(h, proj_w, hidden_dim);
+            *inp++ += sum;
+            proj_w += hidden_dim;
+          }
         }
       }
       printf("x(%d):\n", l);
