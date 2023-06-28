@@ -26,6 +26,7 @@ endif()
 
 # Add executable target with source files
 add_executable(thingy main.cpp
+ blas.h tensor.h
  bpe.h bpe.cpp)
   # kernel.cu)
 

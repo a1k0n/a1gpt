@@ -1,6 +1,6 @@
 #include "bpe.h"
 
-int main() {
+int main(int argc, char **argv) {
   BPEDecoder decoder;
   if (!decoder.Init("vocab.bin")) {
     printf("failed to init decoder\n");
@@ -11,8 +11,12 @@ int main() {
     printf("failed to init encoder\n");
     return 1;
   }
-  int outbuf[256];
-  int ntokens = encoder.Encode("The rain in spain falls mainly on the", outbuf, 256);
+  const char *prompt = "The rain in spain falls mainly on the";
+  if (argc > 1) {
+    prompt = argv[1];
+  }
+  int outbuf[1024];
+  int ntokens = encoder.Encode(prompt, outbuf, 1024);
   printf("encoding: ");
   for (int i = 0; i < ntokens; i++) {
     printf("%d ", outbuf[i]);

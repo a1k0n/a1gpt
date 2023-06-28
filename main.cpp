@@ -6,193 +6,16 @@
 
 #include <string>
 
-#ifdef __APPLE__
-#include <Accelerate/Accelerate.h>
-#endif
-
-#ifdef __AVX__
-#include <immintrin.h>
-#endif
-
 #include <nlohmann/json.hpp>
 
 #include "bpe.h"
+#include "blas.h"
+#include "tensor.h"
 
 /*
 extern float* gpuTransferFloats(float *data, int size);
 extern void gpuDumpMemoryInfo();
 */
-
-template <int N> struct Tensorf {
-  int shape[N];
-  float *data;
-  float *alloc;
-
-  Tensorf() {
-    alloc = NULL;
-  }
-
-  Tensorf(int i) {
-    shape[0] = i;
-    // allocate aligned float array
-    alloc = new float[i + 7];
-    data = (float *)(((uintptr_t)alloc + 31) & ~31);
-  }
-
-  Tensorf(int i, int j) {
-    shape[0] = i;
-    shape[1] = j;
-    // allocate aligned float array
-    alloc = new float[i * j + 7];
-    data = (float *)(((uintptr_t)alloc + 31) & ~31);
-  }
-
-  Tensorf(int i, int j, int k) {
-    shape[0] = i;
-    shape[1] = j;
-    shape[2] = k;
-    // allocate aligned float array
-    alloc = new float[i * j * k + 7];
-    data = (float *)(((uintptr_t)alloc + 31) & ~31);
-  }
-
-  Tensorf(const Tensorf<N> &other) {
-    for (int i = 0; i < N; i++) {
-      shape[i] = other.shape[i];
-    }
-    data = other.data;
-    alloc = other.alloc;
-  }
-
-  ~Tensorf() {
-    if (alloc) {
-      delete[] alloc;
-    }
-  }
-
-  void show() {
-    if (N == 1) {
-      int k = 10;
-      if (shape[0] < k) {
-        k = shape[0];
-      } 
-      for (int i = 0; i < k; i++) {
-        printf("%f ", data[i]);
-      }
-      printf("\n");
-    } else if (N == 2) {
-      int ki = 10;
-      int kj = 10;
-      if (shape[0] < ki) {
-        ki = shape[0];
-      }
-      if (shape[1] < kj) {
-        kj = shape[1];
-      }
-      for (int i = 0; i < ki; i++) {
-        for (int j = 0; j < kj; j++) {
-          printf("%f ", data[i * shape[1] + j]);
-        }
-        printf("\n");
-      }
-    }
-  }
-
-  float& operator[](int i) const {
-    if (N != 1) {
-      fprintf(stderr, "Tensorf: operator[]: expected 1 dimension, got %d\n", N);
-      abort();
-    }
-    if (i >= shape[0]) {
-      fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", i, shape[N-1]);
-      abort();
-    }
-    return data[i];
-  }
-
-  Tensorf<N-1> slice(int i) const {
-    if (N <= 1) {
-      fprintf(stderr, "Tensorf: row: expected >1 dimensions, got %d\n", N);
-      abort();
-    }
-    if (i >= shape[0]) {
-      fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", i, shape[0]);
-      abort();
-    }
-    // return new tensor with no alloc, so it won't destroy the underlying array
-    // when it goes out of scope
-    Tensorf<N-1> out;
-    int stride = 1;
-    for (int j = 0; j < N-1; j++) {
-      out.shape[j] = shape[j+1];
-      stride *= shape[j+1];
-    }
-    out.data = data + i * stride;
-    out.alloc = NULL;
-    return out;
-  }
-
-  float& operator()(int i, int j) const {
-    if (N != 2) {
-      fprintf(stderr, "Tensorf: operator[]: expected 2 dimensions, got %d\n", N);
-      abort();
-    }
-    if (i >= shape[0]) {
-      fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", i, shape[N-2]);
-      abort();
-    }
-    if (j >= shape[1]) {
-      fprintf(stderr, "Tensorf: out of bounds: %d >= %d\n", j, shape[N-1]);
-      abort();
-    }
-    return data[i * shape[1] + j];
-  }
-
-  Tensorf<N>& operator+=(const Tensorf<N> &other) {
-    int size = 1;
-    for (int i = 0; i < N; i++) {
-      if (shape[i] != other.shape[i]) {
-        fprintf(stderr, "Tensorf: operator+: shape mismatch\n");
-        abort();
-      }
-      size *= shape[i];
-    }
-    for (int i = 0; i < size; i++) {
-      data[i] += other.data[i];
-    }
-    return *this;
-  }
-
-  size_t size() const {
-    size_t size = 1;
-    for (int i = 0; i < N; i++) {
-      size *= shape[i];
-    }
-    return size;
-  }
-
-  void zero() {
-    memset(data, 0, size() * sizeof(float));
-  }
-
-  void destroy() {
-    delete[] data;
-  }
-
-  Tensorf<2> *TransposedCopy() {
-    int m = shape[1], n = shape[0];
-    Tensorf<2> *out = new Tensorf<2>(m, n);
-    float *dout = out->data;
-    for (int j = 0; j < m; j++) {
-      float *din = data + j;
-      for (int i = 0; i < n; i++) {
-        *dout++ = *din;
-        din += m;
-      }
-    }
-    return out;
-  }
-};
 
 struct CausalSelfAttention {
   int num_heads;
@@ -275,64 +98,6 @@ Tensorf<N> fetch_layer_weights(const nlohmann::json &j, void *addr, int layer, c
   snprintf(buf, sizeof(buf), "h.%d.%s", layer, name);
   return fetch_weights<N>(j, addr, buf);
 }
-
-static float dot(float *a, float *b, int n) {
-#ifdef __APPLE__
-  return cblas_sdot(n, a, 1, b, 1);
-#elif defined(__AVX__)
-  int i = 0;
-  float sum = 0;
-  if (n > 7) {
-    __m256 sum8 = _mm256_setzero_ps(); // accumulate in a vector
-    int n8 = n&(~7);
-    for (; i < n8; i += 8) {
-      __m256 a8 = _mm256_loadu_ps(a + i);
-      __m256 b8 = _mm256_loadu_ps(b + i);
-      __m256 prod = _mm256_mul_ps(a8, b8);
-      sum8 = _mm256_add_ps(sum8, prod);
-    }
-    // sum up the vector
-    __m128 low128 = _mm256_extractf128_ps(sum8, 0);
-    __m128 high128 = _mm256_extractf128_ps(sum8, 1);
-    low128 = _mm_add_ps(low128, high128);
-    low128 = _mm_hadd_ps(low128, low128);
-    low128 = _mm_hadd_ps(low128, low128);
-    sum = _mm_cvtss_f32(low128);
-  }
-  for (; i < n; i++) {
-    sum += a[i] * b[i];
-  }
-  return sum;
-#else
-  float sum = 0;
-  for (int i = 0; i < n; i++) {
-    sum += a[i] * b[i];
-  }
-  return sum;
-#endif
-}
-
-static void saxpy(int n, float a, float * const x, float *y) {
-#ifdef __APPLE__
-  cblas_saxpy(n, a, x, 1, y, 1);
-#elif defined(__AVX__)
-  // n is assumed to be a multiple of 8 and y is assumed to be aligned
-  __m256 a_vec = _mm256_set1_ps(a);
-  int i = 0;
-  for (; i < n; i += 8) {
-      __m256 src_vec = _mm256_load_ps(x + i);
-      __m256 dest_vec = _mm256_load_ps(y + i);
-      __m256 result_vec = _mm256_add_ps(dest_vec, _mm256_mul_ps(a_vec, src_vec));
-      _mm256_store_ps(y + i, result_vec);
-  }
-  assert(i == n && "axpy: n is not a multiple of 8");
-#else
-  for (int i = 0; i < n; i++) {
-    y[i] += a * x[i];
-  }
-#endif
-}
-
 
 int main() {
   // mmap "model.safetensors" into memory
@@ -439,11 +204,11 @@ int main() {
         float *x = xbuf.data + i*m.embedding_dim;
         float *b = m.h[l].attn.c_attn_bias.data;
         for (int k = 0; k < m.embedding_dim; k++) {
-          qbuf(i, k) = (*b++) + dot(x, w, m.embedding_dim);
+          qbuf(i, k) = (*b++) + sdot(x, w, m.embedding_dim);
           w += m.embedding_dim;
         }
         for (int k = 0; k < 2*m.embedding_dim; k++) {
-          lkvbuf(i, k) = (*b++) + dot(x, w, m.embedding_dim);
+          lkvbuf(i, k) = (*b++) + sdot(x, w, m.embedding_dim);
           w += m.embedding_dim;
         }
       }
@@ -474,7 +239,7 @@ int main() {
             float *qk = qbuf.data + i*m.embedding_dim;
             float *kk = lkvbuf.data + j*2*m.embedding_dim;
             for (int h = 0; h < num_heads; h++) {
-              *att++ = dot(qk, kk, head_siz) * attn_scale;
+              *att++ = sdot(qk, kk, head_siz) * attn_scale;
               qk += head_siz;
               kk += head_siz;
             }
@@ -525,7 +290,7 @@ int main() {
           float *y = ybuf.data + i*m.embedding_dim;
           float *inp = input.data + i*m.embedding_dim;
           for (int j = 0; j < m.embedding_dim; j++) {
-            *inp++ += m.h[l].attn.c_proj_bias[j] + dot(y, w, m.embedding_dim);
+            *inp++ += m.h[l].attn.c_proj_bias[j] + sdot(y, w, m.embedding_dim);
             w += m.embedding_dim;
           }
         }
@@ -540,7 +305,7 @@ int main() {
           float *x = xbuf.data + i*m.embedding_dim;
           float *h = hbuf.data + i*hidden_dim;
           for (int j = 0; j < hidden_dim; j++) {
-            float sum = m.h[l].mlp_c_fc_bias[j] + dot(x, fc_w, m.embedding_dim);
+            float sum = m.h[l].mlp_c_fc_bias[j] + sdot(x, fc_w, m.embedding_dim);
             float gelu = sum * 0.5 * (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
             *h++ = gelu;
             fc_w += m.embedding_dim;
@@ -552,7 +317,7 @@ int main() {
           float *inp = input.data + i*m.embedding_dim;
           float *h = hbuf.data + i*hidden_dim;
           for (int j = 0; j < m.embedding_dim; j++) {
-            float sum = m.h[l].mlp_c_proj_bias[j] + dot(h, proj_w, hidden_dim);
+            float sum = m.h[l].mlp_c_proj_bias[j] + sdot(h, proj_w, hidden_dim);
             *inp++ += sum;
             proj_w += hidden_dim;
           }
@@ -568,7 +333,7 @@ int main() {
       float *w = m.wte_weight.data;
       int largmax = 0;
       for (int j = 0; j < m.ntokens; j++) {
-        logits[j] = dot(ybuf.slice(i).data, w, m.embedding_dim);
+        logits[j] = sdot(ybuf.slice(i).data, w, m.embedding_dim);
         w += m.embedding_dim;
         if (logits[j] > logits[largmax]) {
           largmax = j;

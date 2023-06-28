@@ -1,5 +1,4 @@
-#ifndef BPE_H_
-#define BPE_H_
+#pragma once
 
 #include <string>
 #include <vector>
@@ -31,5 +30,3 @@ class BPEEncoder {
  private:
   BPETrieNode *root_;
 };
-
-#endif /* BPE_H_ */
