@@ -35,6 +35,12 @@ int BPEDecoder::Decode(const int* tokens, int ntokens, char* outbuf, int outbuf_
     if (j >= outbuf_size) {
       break;
     }
+    if (tokens[i] == -1) {
+      outbuf[j++] = '(';
+      outbuf[j++] = '?';
+      outbuf[j++] = ')';
+      continue;
+    }
     if (tokens[i] < 0 || tokens[i] >= vocab_.size()) {
       break;
     }
@@ -93,6 +99,7 @@ int BPEEncoder::Encode(const char *string, int *outbuf, int outbuf_size) {
   while(*string && ntokens < outbuf_size) {
     BPETrieNode* node = root_;
     int last_token_length = -1;
+    int last_token_id = -1;
     for (size_t i = 0; string[i]; i++) {
       char key = string[i];
       if (node->children.count(key) == 0) {
@@ -101,12 +108,13 @@ int BPEEncoder::Encode(const char *string, int *outbuf, int outbuf_size) {
       node = node->children[key];
       if (node->token_length != -1) {
         last_token_length = node->token_length;
+        last_token_id = node->token_id;
       }
     }
     if (last_token_length == -1) {
       return ntokens;
     } else {
-      *outbuf++ = node->token_id;
+      *outbuf++ = last_token_id;
       string += last_token_length;
       ntokens++;
     }
