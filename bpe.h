@@ -18,4 +18,18 @@ class BPEDecoder {
   std::vector<std::string> vocab_;
 };
 
+class BPETrieNode;
+class BPEEncoder {
+ public:
+  BPEEncoder();
+  ~BPEEncoder();
+
+  bool Init(const std::vector<std::string> &vocab);
+
+  int Encode(const char *string, int *outbuf, int outbuf_size);
+
+ private:
+  BPETrieNode *root_;
+};
+
 #endif /* BPE_H_ */

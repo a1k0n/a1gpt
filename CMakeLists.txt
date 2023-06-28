@@ -20,13 +20,18 @@ endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 
+if (APPLE)
+    find_library(ACCELERATE Accelerate)
+endif()
+
 # Add executable target with source files
 add_executable(thingy main.cpp
  bpe.h bpe.cpp)
   # kernel.cu)
 
 target_include_directories(thingy PRIVATE ${CUDA_INCLUDE_DIRS})
-target_link_libraries(thingy PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(thingy PRIVATE nlohmann_json::nlohmann_json ${ACCELERATE})
+
 
 # Specify the C++ standard
 set_target_properties(thingy PROPERTIES
@@ -34,3 +39,9 @@ set_target_properties(thingy PROPERTIES
                       CXX_STANDARD 14
                       CXX_STANDARD_REQUIRED TRUE)
 
+
+# add bpe_test
+add_executable(bpe_test bpe_test.cpp bpe.h bpe.cpp)
+set_target_properties(bpe_test PROPERTIES
+                      CXX_STANDARD 14
+                      CXX_STANDARD_REQUIRED TRUE)

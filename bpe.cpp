@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <unordered_map>
 
 #include "bpe.h"
 
@@ -48,4 +49,67 @@ int BPEDecoder::Decode(const int* tokens, int ntokens, char* outbuf, int outbuf_
   }
   outbuf[j] = 0;
   return j;
+}
+
+struct BPETrieNode {
+  int token_length = -1;  // -1 indicates there is no token ending at this node
+  int token_id;
+  std::unordered_map<char, BPETrieNode*> children;
+
+  ~BPETrieNode() {
+    for (auto it = children.begin(); it != children.end(); it++) {
+      delete it->second;
+    }
+  }
+};
+
+BPEEncoder::BPEEncoder() {
+  root_ = new BPETrieNode();
+}
+
+BPEEncoder::~BPEEncoder() {
+  delete root_;
+}
+
+bool BPEEncoder::Init(const std::vector<std::string>& vocab) {
+  for (int i = 0; i < vocab.size(); i++) {
+    auto token = vocab[i];
+    BPETrieNode* node = root_;
+    for (size_t i = 0; i < token.size(); i++) {
+      char key = token[i];
+      if (node->children.count(key) == 0) {
+        node->children[key] = new BPETrieNode();
+      }
+      node = node->children[key];
+    }
+    node->token_length = token.size();
+    node->token_id = i;
+  }
+  return true;
+}
+
+int BPEEncoder::Encode(const char *string, int *outbuf, int outbuf_size) {
+  int ntokens = 0;
+  while(*string && ntokens < outbuf_size) {
+    BPETrieNode* node = root_;
+    int last_token_length = -1;
+    for (size_t i = 0; string[i]; i++) {
+      char key = string[i];
+      if (node->children.count(key) == 0) {
+        break;
+      }
+      node = node->children[key];
+      if (node->token_length != -1) {
+        last_token_length = node->token_length;
+      }
+    }
+    if (last_token_length == -1) {
+      return ntokens;
+    } else {
+      *outbuf++ = node->token_id;
+      string += last_token_length;
+      ntokens++;
+    }
+  }
+  return ntokens;
 }
