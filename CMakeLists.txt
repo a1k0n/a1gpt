@@ -26,8 +26,9 @@ endif()
 
 # Add executable target with source files
 add_executable(thingy main.cpp
- blas.h tensor.h
- bpe.h bpe.cpp)
+  model.h model.cpp model_load.cpp
+  blas.h tensor.h
+  bpe.h bpe.cpp)
   # kernel.cu)
 
 target_include_directories(thingy PRIVATE ${CUDA_INCLUDE_DIRS})

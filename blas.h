@@ -8,6 +8,8 @@
 #include <immintrin.h>
 #endif
 
+#include <cassert>
+
 // optimized blas routines needed for our little implementation
 
 static float sdot(float *a, float *b, int n) {

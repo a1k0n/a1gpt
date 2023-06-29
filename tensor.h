@@ -1,6 +1,12 @@
 #pragma once
 
+#include <stdio.h>
 #include <unistd.h>
+#include <cassert>
+#include <cstring>
+#include <stdint.h>
+
+#undef ALLOC_DEBUG
 
 template <int N> struct Tensorf {
   int shape[N];
@@ -12,27 +18,39 @@ template <int N> struct Tensorf {
   }
 
   Tensorf(int i) {
+    assert(N == 1);
     shape[0] = i;
     // allocate aligned float array
     alloc = new float[i + 7];
     data = (float *)(((uintptr_t)alloc + 31) & ~31);
+#ifdef ALLOC_DEBUG
+    printf("allocating (%d) %p -> %p\n", i, alloc, data);
+#endif
   }
 
   Tensorf(int i, int j) {
+    assert(N == 2);
     shape[0] = i;
     shape[1] = j;
     // allocate aligned float array
     alloc = new float[i * j + 7];
     data = (float *)(((uintptr_t)alloc + 31) & ~31);
+#ifdef ALLOC_DEBUG
+    printf("allocating (%d, %d) %p -> %p\n", i, j, alloc, data);
+#endif
   }
 
   Tensorf(int i, int j, int k) {
+    assert(N == 3);
     shape[0] = i;
     shape[1] = j;
     shape[2] = k;
     // allocate aligned float array
     alloc = new float[i * j * k + 7];
     data = (float *)(((uintptr_t)alloc + 31) & ~31);
+#ifdef ALLOC_DEBUG
+    printf("allocating (%d, %d, %d) %p -> %p\n", i, j, k, alloc, data);
+#endif
   }
 
   Tensorf(const Tensorf<N> &other) {
@@ -45,6 +63,9 @@ template <int N> struct Tensorf {
 
   ~Tensorf() {
     if (alloc) {
+#ifdef ALLOC_DEBUG
+      printf("freeing %p\n", alloc);
+#endif
       delete[] alloc;
     }
   }
