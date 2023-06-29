@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 
 #include <string>
@@ -33,6 +34,9 @@ int main(int argc, char **argv) {
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
+  float sampling_temperature = 0.9;
+  srand(0);
+
   const char *prompt = "The rain in spain falls mainly on the";
   if (argc > 1) {
     prompt = argv[1];
@@ -40,7 +44,7 @@ int main(int argc, char **argv) {
   {
     int input_vector[1024];
     int N = encoder.Encode(prompt, input_vector, 1024);
-    int ctx_max = N + 128;
+    int ctx_max = 1024;
     {
       printf("encoded prompt: ");
       for (int i = 0; i < N; i++) {
@@ -82,7 +86,26 @@ int main(int argc, char **argv) {
           }
         }
 
+        // sample from logits
         int sampled_token = largmax;
+        float sum = 0;
+        for (int j = 0; j < m.ntokens; j++) {
+          logits[j] = expf(logits[j] / sampling_temperature);
+          sum += logits[j];
+        }
+        for (int j = 0; j < m.ntokens; j++) {
+          logits[j] /= sum;
+        }
+        float r = (float)rand() / RAND_MAX;
+        float acc = 0;
+        for (int j = 0; j < m.ntokens; j++) {
+          acc += logits[j];
+          if (r < acc) {
+            sampled_token = j;
+            break;
+          }
+        }
+
         input_vector[j+1] = sampled_token;
 
         // printf("logits: "); logits.show();

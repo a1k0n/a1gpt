@@ -18,16 +18,24 @@ static float sdot(float *a, float *b, int n) {
 #elif defined(__AVX__)
   int i = 0;
   float sum = 0;
-  if (n > 7) {
+  float *aend = a + n;
+  if (n > 15) {
     __m256 sum8 = _mm256_setzero_ps(); // accumulate in a vector
-    int n8 = n&(~7);
-    for (; i < n8; i += 8) {
-      __m256 a8 = _mm256_loadu_ps(a + i);
-      __m256 b8 = _mm256_loadu_ps(b + i);
-      __m256 prod = _mm256_mul_ps(a8, b8);
-      sum8 = _mm256_add_ps(sum8, prod);
+    __m256 sum81 = _mm256_setzero_ps(); // accumulate in a vector
+    int n8 = n&(~15);
+    float *aend = a + n8;
+    for (; a < aend; a += 16, b += 16) {
+      __m256 a80 = _mm256_load_ps(a);
+      __m256 b80 = _mm256_load_ps(b);
+      __m256 a81 = _mm256_load_ps(a + 8);
+      __m256 b81 = _mm256_load_ps(b + 8);
+      __m256 prod0 = _mm256_mul_ps(a80, b80);
+      __m256 prod1 = _mm256_mul_ps(a81, b81);
+      sum8 = _mm256_add_ps(sum8, prod0);
+      sum81 = _mm256_add_ps(sum81, prod1);
     }
     // sum up the vector
+    sum8 = _mm256_add_ps(sum8, sum81);
     __m128 low128 = _mm256_extractf128_ps(sum8, 0);
     __m128 high128 = _mm256_extractf128_ps(sum8, 1);
     low128 = _mm_add_ps(low128, high128);
@@ -35,8 +43,8 @@ static float sdot(float *a, float *b, int n) {
     low128 = _mm_hadd_ps(low128, low128);
     sum = _mm_cvtss_f32(low128);
   }
-  for (; i < n; i++) {
-    sum += a[i] * b[i];
+  while (a < aend) {
+    sum += (*a++) * (*b++);
   }
   return sum;
 #else

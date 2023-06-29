@@ -5,12 +5,18 @@
 
 void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
                                 const Tensorf<2> &kvbuf, int i) {
-  int emb_siz = xbuf.shape[0];
+  const int emb_siz = 768;
+  const int num_heads = 12;
+
   Tensorf<2> attnbuf(i + 1, num_heads);
   Tensorf<1> qbuf(emb_siz);
   Tensorf<1> ybuf(emb_siz);
 
-  int head_siz = emb_siz / num_heads;
+  assert(xbuf.shape[0] == emb_siz);
+
+  const int head_siz = 64;
+  assert(emb_siz / num_heads == head_siz);
+
   float attn_scale = 1.0 / sqrt(head_siz);
   // first compute q, kv[i]
 
@@ -80,8 +86,7 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
     float *att = attnbuf.data;
     for (int j = 0; j <= i; j++) {
       float *y = ybuf.data;
-      float *v = &kvbuf(
-          j, emb_siz);  // pick out the value vector from the key-value buf
+      float *v = &kvbuf(j, emb_siz);  // pick out the value vector from the key-value buf
       for (int h = 0; h < num_heads; h++) {
         saxpy(head_siz, *att++, v, y);
         v += head_siz;
@@ -129,7 +134,12 @@ void LayerNorm::apply(Tensorf<1> &out, const Tensorf<1> &in) {
 }
 
 void MLPBlock::apply(const Tensorf<1> &out, const Tensorf<1> &in) {
-  int hidden_dim = c_fc_bias.shape[0];
+  int hidden_dim = 4*768; 
+  int emb_dim = 768;
+
+  assert(in.shape[0] == emb_dim);
+  assert(c_fc_bias.shape[0] == hidden_dim);
+
   Tensorf<1> hbuf(hidden_dim);
   // fc part of block
   // input += mlp_c_proj_weight @ gelu(mlp_c_fc_weight @ xbuf + mlp_c_fc_bias) +
@@ -139,10 +149,10 @@ void MLPBlock::apply(const Tensorf<1> &out, const Tensorf<1> &in) {
     float *x = in.data;
     float *h = hbuf.data;
     for (int j = 0; j < hidden_dim; j++) {
-      float sum = c_fc_bias[j] + sdot(x, fc_w, in.shape[0]);
-      float gelu =
-          sum * 0.5 *
-          (1.0 + tanh(0.7978845608028654 * (sum + 0.044715 * sum * sum * sum)));
+      float y = c_fc_bias[j] + sdot(x, fc_w, emb_dim);
+      // float gelu = y * 0.5 * (1.0 + tanhf(0.7978845608028654 * (y + 0.044715 * y * y * y)));
+      // use approximation xσ(1.702x), as expf is cheaper than tanhf
+      float gelu = y / (1 + expf(-1.702*y));
       *h++ = gelu;
       fc_w += in.shape[0];
     }
