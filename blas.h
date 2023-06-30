@@ -56,6 +56,7 @@ static float sdot(float *a, float *b, int n) {
 #endif
 }
 
+// single-precision vector addition: y = a*x + y
 static void saxpy(int n, float a, float * const x, float *y) {
 #ifdef __APPLE__
   cblas_saxpy(n, a, x, 1, y, 1);
@@ -77,3 +78,46 @@ static void saxpy(int n, float a, float * const x, float *y) {
 #endif
 }
 
+
+// variant on saxpy: y = x + b*y
+static void sxpby(int n, float *const x, float b, float *y) {
+#ifdef __APPLE__
+  cblas_sscal(n, b, y, 1);
+  cblas_saxpy(n, 1.0, x, 1, y, 1);
+#elif defined(__AVX__)
+  // n is assumed to be a multiple of 8 and y is assumed to be aligned
+  __m256 b_vec = _mm256_set1_ps(b);
+  int i = 0;
+  for (; i < n; i += 8) {
+      __m256 src_vec = _mm256_load_ps(x + i);
+      __m256 dest_vec = _mm256_load_ps(y + i);
+      __m256 result_vec = _mm256_add_ps(src_vec, _mm256_mul_ps(b_vec, dest_vec));
+      _mm256_store_ps(y + i, result_vec);
+  }
+  assert(i == n && "xpby: n is not a multiple of 8");
+#else
+  for (int i = 0; i < n; i++) {
+    y[i] = x[i] + b*y[i];
+  }
+#endif
+}
+
+static void sscal(int n, float a, float *x) {
+#ifdef __APPLE__
+  cblas_sscal(n, a, x, 1);
+#elif defined(__AVX__)
+  // n is assumed to be a multiple of 8 and x is assumed to be aligned
+  __m256 a_vec = _mm256_set1_ps(a);
+  int i = 0;
+  for (; i < n; i += 8) {
+      __m256 src_vec = _mm256_load_ps(x + i);
+      __m256 result_vec = _mm256_mul_ps(a_vec, src_vec);
+      _mm256_store_ps(x + i, result_vec);
+  }
+  assert(i == n && "scal: n is not a multiple of 8");
+#else
+  for (int i = 0; i < n; i++) {
+    x[i] *= a;
+  }
+#endif
+}

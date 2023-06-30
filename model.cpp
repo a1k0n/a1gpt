@@ -8,7 +8,12 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
   const int emb_siz = 768;
   const int num_heads = 12;
 
-  Tensorf<2> attnbuf(i + 1, num_heads);
+  // algebraic aggregators from the flash attention paper
+  // https://arxiv.org/pdf/2205.14135.pdf section 3.1
+  // but instead of combining blocks, I'm just reducing left-to-right in one
+  // pass over the data
+  Tensorf<1> flashatt_m(num_heads);  // maximum
+  Tensorf<1> flashatt_l(num_heads);  // "l" is the denominator
   Tensorf<1> qbuf(emb_siz);
   Tensorf<1> ybuf(emb_siz);
 
@@ -41,57 +46,49 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
   }
 
   {
-    float *att = attnbuf.data;
-    for (int j = 0; j <= i; j++) {
+    float *qk = qbuf.data;
+    float *kk = &kvbuf(0, 0);
+    float *vk = &kvbuf(0, emb_siz);
+    float *y = ybuf.data;
+    memcpy(y, vk, emb_siz * sizeof(float));  // y is initially the first value for all heads
+    for (int h = 0; h < num_heads; h++) {
+      float a = sdot(qk, kk, head_siz) * attn_scale;
+      flashatt_m[h] = a;
+      flashatt_l[h] = 1;
+      y += head_siz;
+      qk += head_siz;
+      kk += head_siz;
+      vk += head_siz;
+    }
+    for (int j = 1; j <= i; j++) {
       float *qk = qbuf.data;
       float *kk = &kvbuf(j, 0);
+      float *vk = &kvbuf(j, emb_siz);
+      float *y = ybuf.data;
       for (int h = 0; h < num_heads; h++) {
-        *att++ = sdot(qk, kk, head_siz) * attn_scale;
+        float a = sdot(qk, kk, head_siz) * attn_scale;
+        if (a > flashatt_m[h]) {
+          float e = expf(flashatt_m[h] - a); // <1.0
+          sxpby(head_siz, vk, e, y);
+          flashatt_l[h] = 1 + e*flashatt_l[h];
+          flashatt_m[h] = a;
+        } else {
+          float e = expf(a - flashatt_m[h]); // <1.0
+          saxpy(head_siz, e, vk, y);
+          flashatt_l[h] += e;
+        }
+        y += head_siz;
         qk += head_siz;
         kk += head_siz;
+        vk += head_siz;
       }
     }
-  }
-
-  // att = softmax(att)
-  for (int h = 0; h < num_heads; h++) {
-    float max = -1e20;
-    float denom = 0;
-    float *att = attnbuf.data + h;
-    for (int j = 0; j <= i; j++) {
-      float a = *att;
-      att += num_heads;
-      if (a > max) {
-        max = a;
-      }
-    }
-    att = attnbuf.data + h;
-    for (int j = 0; j <= i; j++) {
-      float a = exp(*att - max);
-      denom += a;
-      *att = a;
-      att += num_heads;
-    }
-    float scale = 1.0 / denom;
-    att = attnbuf.data + h;
-    for (int j = 0; j <= i; j++) {
-      *att *= scale;
-      att += num_heads;
-    }
-  }
-
-  // finally accumulate attention @ values -> ybuf
-  {
-    ybuf.zero();
-    float *att = attnbuf.data;
-    for (int j = 0; j <= i; j++) {
-      float *y = ybuf.data;
-      float *v = &kvbuf(j, emb_siz);  // pick out the value vector from the key-value buf
-      for (int h = 0; h < num_heads; h++) {
-        saxpy(head_siz, *att++, v, y);
-        v += head_siz;
-        y += head_siz;
-      }
+    // scale y by 1/l
+    y = ybuf.data;
+    for (int h = 0; h < num_heads; h++) {
+      float scale = 1.0 / flashatt_l[h];
+      sscal(head_siz, scale, y);
+      y += head_siz;
     }
   }
 
