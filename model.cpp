@@ -45,6 +45,8 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
     }
   }
 
+  // with all key-value entries populated, compute attention
+  // the softmax is incrementally aggregated using the flash attention technique
   {
     float *qk = qbuf.data;
     float *kk = &kvbuf(0, 0);
