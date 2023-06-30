@@ -28,16 +28,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Failed to load model\n");
     exit(1);
   }
-  // tokenize("The rain in spain falls mainly on the")
-  // benchmark 100 iterations
-  // get t0 first
+
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
   float sampling_temperature = 0.9;
   srand(0);
 
-  const char *prompt = "The rain in spain falls mainly on the";
+  const char *prompt = "The rain in Spain falls mainly on the";
   if (argc > 1) {
     prompt = argv[1];
   }

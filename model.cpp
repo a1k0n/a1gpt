@@ -50,9 +50,9 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
   {
     float *qk = qbuf.data;
     float *kk = &kvbuf(0, 0);
-    float *vk = &kvbuf(0, emb_siz);
     float *y = ybuf.data;
-    memcpy(y, vk, emb_siz * sizeof(float));  // y is initially the first value for all heads
+    // vk = kk + emb_siz
+    memcpy(y, kk + emb_siz, emb_siz * sizeof(float));  // y is initially the first value for all heads
     for (int h = 0; h < num_heads; h++) {
       float a = sdot(qk, kk, head_siz) * attn_scale;
       flashatt_m[h] = a;
@@ -60,29 +60,27 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
       y += head_siz;
       qk += head_siz;
       kk += head_siz;
-      vk += head_siz;
     }
     for (int j = 1; j <= i; j++) {
       float *qk = qbuf.data;
       float *kk = &kvbuf(j, 0);
-      float *vk = &kvbuf(j, emb_siz);
+      // vk = kk + emb_siz
       float *y = ybuf.data;
       for (int h = 0; h < num_heads; h++) {
         float a = sdot(qk, kk, head_siz) * attn_scale;
         if (a > flashatt_m[h]) {
           float e = expf(flashatt_m[h] - a); // <1.0
-          sxpby(head_siz, vk, e, y);
+          sxpby(head_siz, kk + emb_siz, e, y);
           flashatt_l[h] = 1 + e*flashatt_l[h];
           flashatt_m[h] = a;
         } else {
           float e = expf(a - flashatt_m[h]); // <1.0
-          saxpy(head_siz, e, vk, y);
+          saxpy(head_siz, e, kk + emb_siz, y);
           flashatt_l[h] += e;
         }
         y += head_siz;
         qk += head_siz;
         kk += head_siz;
-        vk += head_siz;
       }
     }
     // scale y by 1/l
