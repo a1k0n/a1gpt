@@ -124,5 +124,5 @@ int main(int argc, char **argv) {
 
   clock_gettime(CLOCK_MONOTONIC, &t1);
   double elapsed = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-  printf("elapsed: %f\n", elapsed);
+  printf("elapsed: %fs, %fms per token\n", elapsed, 1000 * elapsed / 1024.);
 }
