@@ -8,6 +8,8 @@
 #include "tensor.h"
 #include "model.h"
 
+extern bool load_gpt2_model(Model &m);
+
 /*
 extern float* gpuTransferFloats(float *data, int size);
 extern void gpuDumpMemoryInfo();
@@ -15,16 +17,18 @@ extern void gpuDumpMemoryInfo();
 
 int main(int argc, char **argv) {
   BPEDecoder decoder;
-  if (!decoder.Init("vocab.bin")) {
-    fprintf(stderr, "Failed to init decoder from vocab.bin\n");
-    exit(1);
+  if (!decoder.Init("model/vocab.bin")) {
+    if (!decoder.Init("../model/vocab.bin")) {
+      fprintf(stderr, "Failed to init decoder from ../model/vocab.bin\n");
+      exit(1);
+    }
   }
 
   BPEEncoder encoder;
   encoder.Init(decoder.vocab_);
 
   Model m;
-  if (!m.Load("model.safetensors")) {
+  if (!load_gpt2_model(m)) {
     fprintf(stderr, "Failed to load model\n");
     exit(1);
   }

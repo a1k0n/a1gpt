@@ -1,0 +1,5 @@
+gpt2-vocab.json
+model.safetensors
+model/gpt2-weights.bin
+.vscode/
+build/

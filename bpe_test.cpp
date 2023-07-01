@@ -2,7 +2,7 @@
 
 int main(int argc, char **argv) {
   BPEDecoder decoder;
-  if (!decoder.Init("vocab.bin")) {
+  if (!decoder.Init("model/vocab.bin")) {
     printf("failed to init decoder\n");
     return 1;
   }

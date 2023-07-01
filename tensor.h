@@ -1,10 +1,11 @@
 #pragma once
 
-#include <stdio.h>
-#include <unistd.h>
-#include <cassert>
-#include <cstring>
+#include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #undef ALLOC_DEBUG
 
@@ -15,6 +16,19 @@ template <int N> struct Tensorf {
 
   Tensorf() {
     alloc = NULL;
+  }
+
+  Tensorf(float *_data, int i) {
+    assert(N == 1);
+    shape[0] = i;
+    data = _data;
+  }
+
+  Tensorf(float *_data, int i, int j) {
+    assert(N == 2);
+    shape[0] = i;
+    shape[1] = j;
+    data = _data;
   }
 
   Tensorf(int i) {
