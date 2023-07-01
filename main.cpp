@@ -36,10 +36,10 @@ int main(int argc, char **argv) {
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
-  float sampling_temperature = 0.9;
+  float sampling_temperature = 1.0;
   srand(0);
 
-  const char *prompt = "The rain in Spain falls mainly on the";
+  const char *prompt = "In a shocking finding, scientist discovered a herd of unicorns living in a remote, previously unexplored valley, in the Andes Mountains. Even more surprising to the researchers was the fact that the unicorns spoke perfect English.";
   if (argc > 1) {
     prompt = argv[1];
   }

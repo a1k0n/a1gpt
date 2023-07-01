@@ -2,6 +2,12 @@
 cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
 project(a1gpt LANGUAGES CXX) # CUDA)
 
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING
+      "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel."
+      FORCE)
+endif()
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 
 if (APPLE)

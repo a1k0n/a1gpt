@@ -22,6 +22,7 @@ template <int N> struct Tensorf {
     assert(N == 1);
     shape[0] = i;
     data = _data;
+    alloc = NULL;
   }
 
   Tensorf(float *_data, int i, int j) {
@@ -29,6 +30,7 @@ template <int N> struct Tensorf {
     shape[0] = i;
     shape[1] = j;
     data = _data;
+    alloc = NULL;
   }
 
   Tensorf(int i) {
