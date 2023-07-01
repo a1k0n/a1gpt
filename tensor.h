@@ -164,21 +164,6 @@ template <int N> struct Tensorf {
     return data[i * shape[1] + j];
   }
 
-  Tensorf<N>& operator+=(const Tensorf<N> &other) {
-    int size = 1;
-    for (int i = 0; i < N; i++) {
-      if (shape[i] != other.shape[i]) {
-        fprintf(stderr, "Tensorf: operator+: shape mismatch\n");
-        abort();
-      }
-      size *= shape[i];
-    }
-    for (int i = 0; i < size; i++) {
-      data[i] += other.data[i];
-    }
-    return *this;
-  }
-
   size_t size() const {
     size_t size = 1;
     for (int i = 0; i < N; i++) {
@@ -189,23 +174,5 @@ template <int N> struct Tensorf {
 
   void zero() {
     memset(data, 0, size() * sizeof(float));
-  }
-
-  void destroy() {
-    delete[] data;
-  }
-
-  Tensorf<2> *TransposedCopy() {
-    int m = shape[1], n = shape[0];
-    Tensorf<2> *out = new Tensorf<2>(m, n);
-    float *dout = out->data;
-    for (int j = 0; j < m; j++) {
-      float *din = data + j;
-      for (int i = 0; i < n; i++) {
-        *dout++ = *din;
-        din += m;
-      }
-    }
-    return out;
   }
 };

@@ -7,11 +7,13 @@ no external dependencies except for accelerate framework on macos
 
 ## build / run
 
-First, download and convert the model
+ - First, download and convert the model
 
 `$ python3 scripts/download_and_convert_gpt2.py`
 
-CMake and build
+This will require `numpy` and `huggingface_hub` to be installed in Python
+
+ - CMake and build
 
 note: RelWithDebInfo is the default build type, so it should run pretty quick
 
