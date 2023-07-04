@@ -19,6 +19,9 @@ const char *DEFAULT_PROMPT =
 
 void usage() {
   fprintf(stderr, "Usage: ./gpt2 [-s seed] [-t sampling_temperature] [-p prompt]\n");
+  fprintf(stderr, "  -s seed: random seed (default: time(NULL))\n");
+  fprintf(stderr, "  -t sampling_temperature: temperature for sampling (default: 1.0)\n");
+  fprintf(stderr, "  -p prompt: prompt to start with (default: English-speaking unicorns)\n");
   exit(1);
 }
 
@@ -49,7 +52,7 @@ int main(int argc, char **argv) {
       }
     } else {
       fprintf(stderr, "Unknown argument: %s\n", argv[i]);
-      exit(1);
+      usage();
     }
   }
 
@@ -78,83 +81,47 @@ int main(int argc, char **argv) {
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
   {
-    int input_vector[1024];
-    int N = encoder.Encode(prompt, input_vector, 1024);
+    const int ctx_max = 1024;
+    Tensorf<3> kvbuf(12, ctx_max, 2*m.embedding_dim);
+    Tensorf<1> ybuf(m.embedding_dim);
+    Tensorf<1> logitbuf(m.ntokens);
+    int ctx_tokens[1024];
+    int N = encoder.Encode(prompt, ctx_tokens, 1024);
     if (N == 0) {
-      input_vector[0] = 50256; // <|endoftext|>
+      ctx_tokens[0] = 50256; // <|endoftext|>
       N = 1;
     }
-    int ctx_max = 1024;
     {
       printf("encoded prompt: ");
       for (int i = 0; i < N; i++) {
-        printf("%d ", input_vector[i]);
+        printf("%d ", ctx_tokens[i]);
       }
       char buf[4096];
-      decoder.Decode(input_vector, N, buf, 4096);
+      decoder.Decode(ctx_tokens, N, buf, 4096);
       printf("\nGenerating:\n%s", buf);
       fflush(stdout);
     }
-    Tensorf<3> kvbuf(12, ctx_max, 2*m.embedding_dim);
-    Tensorf<1> logits(m.ntokens);
-    Tensorf<1> input_buf(m.embedding_dim);
     for (int j = 0; j < ctx_max; j++) {
-      float *input = input_buf.data;
-      for (int k = 0; k < m.embedding_dim; k++) {
-        input[k] = m.wte_weight(input_vector[j], k) + m.wpe_weight(j, k);
-      }
-      for (int l = 0; l < 12; l++) {
-        m.h[l].apply(input_buf, kvbuf.slice(l), j);
-      }
-      // at this point we could apply lm_head but we only really need it for prediction
+      m.apply(ctx_tokens[j], j, kvbuf, ybuf);
 
-      if (j < N-1) {
-        // no need to run lm_head on the prompt; afterwards, we start to generate
+      if (j < N - 1) {
+        // no need to run lm_head on the prompt; afterwards, we start to
+        // generate
         continue;
       }
-      Tensorf<1> ybuf(m.embedding_dim);
-      // finally, layernorm and dot with embedding matrix
+
+      float r = (float)rand() / RAND_MAX;
+      int sampled_token = m.sample_head(ybuf, sampling_temperature, r, logitbuf);
+
+      ctx_tokens[j + 1] = sampled_token;
+
+      // printf("logits: "); logits.show();
+      // printf("argmax: %d (%s) = %f\n", largmax,
+      // decoder.vocab_[largmax].c_str(), logits[largmax]);
       {
-        m.ln_f.apply(ybuf, input_buf);
-        float *w = m.wte_weight.data;
-        int largmax = 0;
-        for (int j = 0; j < m.ntokens; j++) {
-          logits[j] = sdot(ybuf.data, w, m.embedding_dim);
-          w += m.embedding_dim;
-          if (logits[j] > logits[largmax]) {
-            largmax = j;
-          }
-        }
-
-        // sample from logits
-        int sampled_token = largmax;
-        float sum = 0;
-        for (int j = 0; j < m.ntokens; j++) {
-          logits[j] = expf(logits[j] / sampling_temperature);
-          sum += logits[j];
-        }
-        for (int j = 0; j < m.ntokens; j++) {
-          logits[j] /= sum;
-        }
-        float r = (float)rand() / RAND_MAX;
-        float acc = 0;
-        for (int j = 0; j < m.ntokens; j++) {
-          acc += logits[j];
-          if (r < acc) {
-            sampled_token = j;
-            break;
-          }
-        }
-
-        input_vector[j+1] = sampled_token;
-
-        // printf("logits: "); logits.show();
-        // printf("argmax: %d (%s) = %f\n", largmax, decoder.vocab_[largmax].c_str(), logits[largmax]);
-        {
-          std::string& token = decoder.vocab_[sampled_token];
-          fwrite(token.c_str(), 1, token.size(), stdout);
-          fflush(stdout);
-        }
+        std::string &token = decoder.vocab_[sampled_token];
+        fwrite(token.c_str(), 1, token.size(), stdout);
+        fflush(stdout);
       }
     }
     printf("\n");

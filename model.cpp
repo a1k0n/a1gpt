@@ -4,7 +4,7 @@
 #include "model.h"
 
 void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
-                                const Tensorf<2> &kvbuf, int i) {
+                                int i, const Tensorf<2> &kvbuf) {
   const int emb_siz = 768;
   const int num_heads = 12;
 
@@ -165,4 +165,38 @@ void MLPBlock::apply(const Tensorf<1> &out, const Tensorf<1> &in) {
       proj_w += hidden_dim;
     }
   }
+}
+
+int Model::sample_head(Tensorf<1> &emb_in, float sampling_temperature,
+                       float uniform_sample, Tensorf<1> &logits) {
+  // layernorm and dot with embedding matrix
+  ln_f.apply(emb_in, emb_in);
+  float *w = wte_weight.data;
+  float m = -INFINITY;
+  for (int j = 0; j < ntokens; j++) {
+    logits[j] = sdot(emb_in.data, w, embedding_dim);
+    if (logits[j] > m) {
+      m = logits[j];
+    }
+    w += embedding_dim;
+  }
+
+  // sample from logits
+  float sum = 0;
+  for (int j = 0; j < ntokens; j++) {
+    logits[j] = expf((logits[j] - m) / sampling_temperature);
+    sum += logits[j];
+  }
+  for (int j = 0; j < ntokens; j++) {
+    logits[j] /= sum;
+  }
+  float acc = 0;
+  for (int j = 0; j < ntokens; j++) {
+    acc += logits[j];
+    if (acc >= uniform_sample) {
+      return j;
+    }
+  }
+  fprintf(stderr, "[sampling error? r=%f, acc=%f]\n", uniform_sample, acc);
+  return 0;
 }

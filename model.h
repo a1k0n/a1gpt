@@ -12,7 +12,7 @@ struct CausalSelfAttention {
   // adds self-attention(x, kvbuf) to x at token index i
   // kvbuf is a buffer of shape <tokens, 2*embedding_dim>
   // (modifies kvbuf[i], reads kvbuf[:i-1])
-  void apply(const Tensorf<1> &out, const Tensorf<1> &xbuf, const Tensorf<2> &kvbuf, int i);
+  void apply(const Tensorf<1> &out, const Tensorf<1> &xbuf, int i, const Tensorf<2> &kvbuf);
 };
 
 struct LayerNorm {
@@ -39,11 +39,11 @@ struct TransformerBlock {
   LayerNorm ln_1, ln_2;
   MLPBlock mlp;
 
-  void apply(const Tensorf<1> &x, const Tensorf<2> &kvbuf, int i) {
+  void apply(const Tensorf<1> &x, int i, const Tensorf<2> &kvbuf) {
     Tensorf<1> xbuf(x.shape[0]);
     // x += attn(ln_1(x), kvbuf, i)
     ln_1.apply(xbuf, x);
-    attn.apply(x, xbuf, kvbuf, i);
+    attn.apply(x, xbuf, i, kvbuf);
     // x += proj(gelu(fc(ln_2(x))))
     ln_2.apply(xbuf, x);
     mlp.apply(x, xbuf);
@@ -62,6 +62,16 @@ struct Model {
 
   TransformerBlock *h;
 
-  bool Load(const char *path);
-};
+  void apply(int token_id, int input_pos, const Tensorf<3> &kvbuf,
+             const Tensorf<1> &emb_out) {
+    for (int k = 0; k < embedding_dim; k++) {
+      emb_out[k] = wte_weight(token_id, k) + wpe_weight(input_pos, k);
+    }
+    for (int layer = 0; layer < 12; layer++) {
+      h[layer].apply(emb_out, input_pos, kvbuf.slice(layer));
+    }
+  }
 
+  int sample_head(Tensorf<1> &emb_in, float sampling_temperature,
+                  float uniform_sample, Tensorf<1> &logits);
+};
