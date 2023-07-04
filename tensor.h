@@ -15,6 +15,7 @@ template <int N> struct Tensorf {
   float *alloc;
 
   Tensorf() {
+    data = NULL;
     alloc = NULL;
   }
 

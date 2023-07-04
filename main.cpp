@@ -13,6 +13,7 @@
 const int ctx_max = 1024;
 extern bool load_gpt2_model(Model &m);
 float sampling_temperature = 0.9;
+float classifier_free_guidance = 1.0;
 
 const char *DEFAULT_PROMPT =
     "In a shocking finding, scientist discovered a herd of unicorns living in "
@@ -26,6 +27,7 @@ void usage() {
   fprintf(stderr, "  -t sampling_temperature: temperature for sampling (default: %0.2f)\n", sampling_temperature);
   fprintf(stderr, "  -p prompt: prompt to start with (default: English-speaking unicorns)\n");
   fprintf(stderr, "  -n ntokens: number of tokens to generate (default=max: %d)\n", ctx_max);
+  fprintf(stderr, "  -c cfg_scale: classifier-free guidance scale; 1.0 means no CFG (default: %0.1f)\n", classifier_free_guidance);
   exit(1);
 }
 
@@ -35,7 +37,7 @@ int main(int argc, char **argv) {
   int ntokens_gen = 1024;
 
   int c;
-  while ((c = getopt(argc, argv, "s:t:p:n:h")) != -1) {
+  while ((c = getopt(argc, argv, "s:t:p:n:c:h")) != -1) {
     switch (c) {
       case 's':
         seed = atoi(optarg);
@@ -50,6 +52,13 @@ int main(int argc, char **argv) {
         ntokens_gen = atoi(optarg);
         if (ntokens_gen > ctx_max) {
           fprintf(stderr, "ERROR: ntokens must be <= %d\n", ctx_max);
+          usage();
+        }
+        break;
+      case 'c':
+        classifier_free_guidance = atof(optarg);
+        if (classifier_free_guidance <= 0) {
+          fprintf(stderr, "ERROR: cfg_scale must be > 0\n");
           usage();
         }
         break;
@@ -92,6 +101,10 @@ int main(int argc, char **argv) {
     Tensorf<3> kvbuf(12, ctx_max, 2*m.embedding_dim);
     Tensorf<1> ybuf(m.embedding_dim);
 
+    Tensorf<3> cfg_kvbuf(12, ctx_max, 2*m.embedding_dim);
+    Tensorf<1> cfg_ybuf(m.embedding_dim);
+    int cfg_ptr;
+
     // forbid generation of <|endoftext|> by cutting it out of the logit buffer (it's the last token)
     Tensorf<1> logitbuf(m.ntokens - 1);
 
@@ -104,6 +117,11 @@ int main(int argc, char **argv) {
       ntokens_gen = ctx_max;
     }
     N++;
+
+    if (classifier_free_guidance != 1.0) {
+      m.apply(ctx_tokens[0], 0, cfg_kvbuf, cfg_ybuf);
+      cfg_ptr = 1;
+    }
 
     fprintf(stderr, "a1gpt seed=%u sampling_temperature=%0.2f ntokens=%d\n", seed,
             sampling_temperature, ntokens_gen);
@@ -129,10 +147,20 @@ int main(int argc, char **argv) {
         continue;
       }
 
+      if (classifier_free_guidance != 1.0) {
+        for (int k = 0; k < m.embedding_dim; k++) {
+          ybuf[k] = classifier_free_guidance * ybuf[k] - (classifier_free_guidance-1) * cfg_ybuf[k];
+        }
+      }
+
       float r = (float)rand() / RAND_MAX;
       int sampled_token = m.sample_head(ybuf, sampling_temperature, r, logitbuf);
 
       ctx_tokens[j + 1] = sampled_token;
+      if (classifier_free_guidance != 1.0) {
+        m.apply(ctx_tokens[j+1], cfg_ptr, cfg_kvbuf, cfg_ybuf);
+        cfg_ptr++;
+      }
 
       // printf("logits: "); logits.show();
       // printf("argmax: %d (%s) = %f\n", largmax,
