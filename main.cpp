@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     // forbid generation of <|endoftext|> by cutting it out of the logit buffer (it's the last token)
     Tensorf<1> logitbuf(m.ntokens - 1);
 
-    int ctx_tokens[ctx_max];
+    int ctx_tokens[ctx_max+1];
     // always start with <|endoftext|>
     ctx_tokens[0] = 50256; // <|endoftext|>
     int N = encoder.Encode(prompt, ctx_tokens+1, ctx_max - 1);
