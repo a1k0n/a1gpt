@@ -21,17 +21,16 @@ const char *DEFAULT_PROMPT =
 void usage() {
   fprintf(stderr, "Usage: ./gpt2 [-s seed] [-t sampling_temperature] [-p prompt]\n");
   fprintf(stderr, "  -s seed: random seed (default: time(NULL))\n");
-  fprintf(stderr, "  -t sampling_temperature: temperature for sampling (default: 1.0)\n");
+  fprintf(stderr, "  -t sampling_temperature: temperature for sampling (default: 0.9)\n");
   fprintf(stderr, "  -p prompt: prompt to start with (default: English-speaking unicorns)\n");
   exit(1);
 }
 
 int main(int argc, char **argv) {
   unsigned int seed = time(NULL);
-  float sampling_temperature = 1.0;
+  float sampling_temperature = 0.9;
   const char *prompt = DEFAULT_PROMPT;
 
-  getopt(argc, argv, "s:t:p:h");
   int c;
   while ((c = getopt(argc, argv, "s:t:p:h")) != -1) {
     switch (c) {
@@ -45,10 +44,8 @@ int main(int argc, char **argv) {
         prompt = optarg;
         break;
       case 'h':
-        usage();
-        break;
       default:
-        fprintf(stderr, "Unknown flag: %s\n", optarg);
+        usage();
         usage();
     }
   }
@@ -82,12 +79,13 @@ int main(int argc, char **argv) {
     Tensorf<3> kvbuf(12, ctx_max, 2*m.embedding_dim);
     Tensorf<1> ybuf(m.embedding_dim);
     Tensorf<1> logitbuf(m.ntokens);
-    int ctx_tokens[1024];
-    int N = encoder.Encode(prompt, ctx_tokens, 1024);
-    if (N == 0) {
-      ctx_tokens[0] = 50256; // <|endoftext|>
-      N = 1;
-    }
+
+    int ctx_tokens[ctx_max];
+    // always start with <|endoftext|>
+    ctx_tokens[0] = 50256; // <|endoftext|>
+    int N = encoder.Encode(prompt, ctx_tokens+1, ctx_max - 1);
+    N++;
+
     {
       printf("encoded prompt: ");
       for (int i = 0; i < N; i++) {
