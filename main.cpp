@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
   float sampling_temperature = 1.0;
-  srand(0);
+  srand(time(NULL));
 
   const char *prompt = "In a shocking finding, scientist discovered a herd of unicorns living in a remote, previously unexplored valley, in the Andes Mountains. Even more surprising to the researchers was the fact that the unicorns spoke perfect English.";
   if (argc > 1) {
@@ -47,6 +47,10 @@ int main(int argc, char **argv) {
   {
     int input_vector[1024];
     int N = encoder.Encode(prompt, input_vector, 1024);
+    if (N == 0) {
+      input_vector[0] = 50256; // <|endoftext|>
+      N = 1;
+    }
     int ctx_max = 1024;
     {
       printf("encoded prompt: ");
