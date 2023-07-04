@@ -3,3 +3,4 @@ model.safetensors
 model/gpt2-weights.bin
 .vscode/
 build/
+.DS_Store
