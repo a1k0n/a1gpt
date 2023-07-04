@@ -50,6 +50,12 @@ int main(int argc, char **argv) {
     }
   }
 
+  // if there are any extra args, warn
+  if (optind < argc) {
+    fprintf(stderr, "ERROR: extra args %s... ignored; use -p \"prompt\" to set the prompt\n", argv[optind]);
+    usage();
+  }
+
   srand(seed);
 
   BPEDecoder decoder;
