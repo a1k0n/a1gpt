@@ -11,12 +11,50 @@
 
 extern bool load_gpt2_model(Model &m);
 
-/*
-extern float* gpuTransferFloats(float *data, int size);
-extern void gpuDumpMemoryInfo();
-*/
+const char *DEFAULT_PROMPT =
+    "In a shocking finding, scientist discovered a herd of unicorns living in "
+    "a remote, previously unexplored valley, in the Andes Mountains. Even more "
+    "surprising to the researchers was the fact that the unicorns spoke "
+    "perfect English.";
+
+void usage() {
+  fprintf(stderr, "Usage: ./gpt2 [-s seed] [-t sampling_temperature] [-p prompt]\n");
+  exit(1);
+}
 
 int main(int argc, char **argv) {
+  unsigned int seed = time(NULL);
+  float sampling_temperature = 1.0;
+  const char *prompt = DEFAULT_PROMPT;
+
+  /* parse flags */
+  for (int i = 1; i < argc; i++) {
+    if (argv[i][0] == '-') {
+      switch (argv[i][1]) {
+        case 's':
+          seed = atoi(argv[++i]);
+          break;
+        case 't':
+          sampling_temperature = atof(argv[++i]);
+          break;
+        case 'p':
+          prompt = argv[++i];
+          break;
+        case 'h':
+          usage();
+          break;
+        default:
+          fprintf(stderr, "Unknown flag: %s\n", argv[i]);
+          usage();
+      }
+    } else {
+      fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+      exit(1);
+    }
+  }
+
+  srand(seed);
+
   BPEDecoder decoder;
   if (!decoder.Init("model/vocab.bin")) {
     if (!decoder.Init("../model/vocab.bin")) {
@@ -28,6 +66,8 @@ int main(int argc, char **argv) {
   BPEEncoder encoder;
   encoder.Init(decoder.vocab_);
 
+  fprintf(stderr, "a1gpt seed=%u sampling_temperature=%f\n", seed, sampling_temperature);
+
   Model m;
   if (!load_gpt2_model(m)) {
     fprintf(stderr, "Failed to load model\n");
@@ -37,13 +77,6 @@ int main(int argc, char **argv) {
   struct timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
-  float sampling_temperature = 1.0;
-  srand(time(NULL));
-
-  const char *prompt = "In a shocking finding, scientist discovered a herd of unicorns living in a remote, previously unexplored valley, in the Andes Mountains. Even more surprising to the researchers was the fact that the unicorns spoke perfect English.";
-  if (argc > 1) {
-    prompt = argv[1];
-  }
   {
     int input_vector[1024];
     int N = encoder.Encode(prompt, input_vector, 1024);
