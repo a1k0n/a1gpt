@@ -10,7 +10,9 @@
 #include "tensor.h"
 #include "model.h"
 
+const int ctx_max = 1024;
 extern bool load_gpt2_model(Model &m);
+float sampling_temperature = 0.9;
 
 const char *DEFAULT_PROMPT =
     "In a shocking finding, scientist discovered a herd of unicorns living in "
@@ -21,18 +23,19 @@ const char *DEFAULT_PROMPT =
 void usage() {
   fprintf(stderr, "Usage: ./gpt2 [-s seed] [-t sampling_temperature] [-p prompt]\n");
   fprintf(stderr, "  -s seed: random seed (default: time(NULL))\n");
-  fprintf(stderr, "  -t sampling_temperature: temperature for sampling (default: 0.9)\n");
+  fprintf(stderr, "  -t sampling_temperature: temperature for sampling (default: %0.2f)\n", sampling_temperature);
   fprintf(stderr, "  -p prompt: prompt to start with (default: English-speaking unicorns)\n");
+  fprintf(stderr, "  -n ntokens: number of tokens to generate (default=max: %d)\n", ctx_max);
   exit(1);
 }
 
 int main(int argc, char **argv) {
   unsigned int seed = time(NULL);
-  float sampling_temperature = 0.9;
   const char *prompt = DEFAULT_PROMPT;
+  int ntokens_gen = 1024;
 
   int c;
-  while ((c = getopt(argc, argv, "s:t:p:h")) != -1) {
+  while ((c = getopt(argc, argv, "s:t:p:n:h")) != -1) {
     switch (c) {
       case 's':
         seed = atoi(optarg);
@@ -42,6 +45,13 @@ int main(int argc, char **argv) {
         break;
       case 'p':
         prompt = optarg;
+        break;
+      case 'n':
+        ntokens_gen = atoi(optarg);
+        if (ntokens_gen > ctx_max) {
+          fprintf(stderr, "ERROR: ntokens must be <= %d\n", ctx_max);
+          usage();
+        }
         break;
       case 'h':
       default:
@@ -69,8 +79,6 @@ int main(int argc, char **argv) {
   BPEEncoder encoder;
   encoder.Init(decoder.vocab_);
 
-  fprintf(stderr, "a1gpt seed=%u sampling_temperature=%f\n", seed, sampling_temperature);
-
   Model m;
   if (!load_gpt2_model(m)) {
     fprintf(stderr, "Failed to load model\n");
@@ -81,7 +89,6 @@ int main(int argc, char **argv) {
   clock_gettime(CLOCK_MONOTONIC, &t0);
 
   {
-    const int ctx_max = 1024;
     Tensorf<3> kvbuf(12, ctx_max, 2*m.embedding_dim);
     Tensorf<1> ybuf(m.embedding_dim);
 
@@ -92,19 +99,28 @@ int main(int argc, char **argv) {
     // always start with <|endoftext|>
     ctx_tokens[0] = 50256; // <|endoftext|>
     int N = encoder.Encode(prompt, ctx_tokens+1, ctx_max - 1);
+    ntokens_gen += N;
+    if (ntokens_gen > ctx_max) {
+      ntokens_gen = ctx_max;
+    }
     N++;
 
+    fprintf(stderr, "a1gpt seed=%u sampling_temperature=%0.2f ntokens=%d\n", seed,
+            sampling_temperature, ntokens_gen);
+
+
     {
-      printf("encoded prompt: ");
+      fprintf(stderr, "encoded prompt: ");
       for (int i = 0; i < N; i++) {
-        printf("%d ", ctx_tokens[i]);
+        fprintf(stderr, "%d ", ctx_tokens[i]);
       }
       char buf[4096];
-      decoder.Decode(ctx_tokens, N, buf, 4096);
-      printf("\nGenerating:\n%s", buf);
+      int decoded_siz = decoder.Decode(ctx_tokens, N, buf, 4096);
+      fprintf(stderr, "\nGenerating:\n");
+      fwrite(buf, 1, decoded_siz, stdout);
       fflush(stdout);
     }
-    for (int j = 0; j < ctx_max; j++) {
+    for (int j = 0; j < ntokens_gen; j++) {
       m.apply(ctx_tokens[j], j, kvbuf, ybuf);
 
       if (j < N - 1) {
