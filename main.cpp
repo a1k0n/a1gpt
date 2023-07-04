@@ -133,7 +133,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "%d ", ctx_tokens[i]);
       }
       char buf[4096];
-      int decoded_siz = decoder.Decode(ctx_tokens, N, buf, 4096);
+      // skip displaying the initial <|endoftext|> token
+      int decoded_siz = decoder.Decode(ctx_tokens+1, N-1, buf, 4096);
       fprintf(stderr, "\nGenerating:\n");
       fwrite(buf, 1, decoded_siz, stdout);
       fflush(stdout);
