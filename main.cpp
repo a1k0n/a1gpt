@@ -78,7 +78,9 @@ int main(int argc, char **argv) {
     const int ctx_max = 1024;
     Tensorf<3> kvbuf(12, ctx_max, 2*m.embedding_dim);
     Tensorf<1> ybuf(m.embedding_dim);
-    Tensorf<1> logitbuf(m.ntokens);
+
+    // forbid generation of <|endoftext|> by cutting it out of the logit buffer (it's the last token)
+    Tensorf<1> logitbuf(m.ntokens - 1);
 
     int ctx_tokens[ctx_max];
     // always start with <|endoftext|>

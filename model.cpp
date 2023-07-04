@@ -171,6 +171,7 @@ int Model::sample_head(Tensorf<1> &emb_in, float sampling_temperature,
                        float uniform_sample, Tensorf<1> &logits) {
   // layernorm and dot with embedding matrix
   ln_f.apply(emb_in, emb_in);
+  const int ntokens = logits.shape[0];
   float *w = wte_weight.data;
   float m = -INFINITY;
   for (int j = 0; j < ntokens; j++) {
