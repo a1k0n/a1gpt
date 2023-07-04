@@ -1,3 +1,4 @@
+#include <getopt.h>
 #include <math.h>
 #include <stdio.h>
 #include <time.h>
@@ -30,29 +31,25 @@ int main(int argc, char **argv) {
   float sampling_temperature = 1.0;
   const char *prompt = DEFAULT_PROMPT;
 
-  /* parse flags */
-  for (int i = 1; i < argc; i++) {
-    if (argv[i][0] == '-') {
-      switch (argv[i][1]) {
-        case 's':
-          seed = atoi(argv[++i]);
-          break;
-        case 't':
-          sampling_temperature = atof(argv[++i]);
-          break;
-        case 'p':
-          prompt = argv[++i];
-          break;
-        case 'h':
-          usage();
-          break;
-        default:
-          fprintf(stderr, "Unknown flag: %s\n", argv[i]);
-          usage();
-      }
-    } else {
-      fprintf(stderr, "Unknown argument: %s\n", argv[i]);
-      usage();
+  getopt(argc, argv, "s:t:p:h");
+  int c;
+  while ((c = getopt(argc, argv, "s:t:p:h")) != -1) {
+    switch (c) {
+      case 's':
+        seed = atoi(optarg);
+        break;
+      case 't':
+        sampling_temperature = atof(optarg);
+        break;
+      case 'p':
+        prompt = optarg;
+        break;
+      case 'h':
+        usage();
+        break;
+      default:
+        fprintf(stderr, "Unknown flag: %s\n", optarg);
+        usage();
     }
   }
 
