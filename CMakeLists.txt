@@ -35,7 +35,7 @@ set_target_properties(gpt2 PROPERTIES
 
 if (CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
-  add_executable(cugpt2 cumain.cpp
+  add_executable(cugpt2 main.cpp
     model.h model_cu.cpp model_load_gpt2.cpp
     tensor.h bpe.h bpe.cpp kernel.cu)
   # Specify the C++ standard
@@ -43,6 +43,9 @@ if (CMAKE_CUDA_COMPILER)
                         CUDA_SEPARABLE_COMPILATION ON
                         CXX_STANDARD 14
                         CXX_STANDARD_REQUIRED TRUE)
+  # #define CUDA and add include path
+  target_compile_definitions(cugpt2 PRIVATE CUDA)
+  target_include_directories(cugpt2 PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 else()
   message(WARNING "CUDA not found, CUDA targets will be unavailable.")
 endif()

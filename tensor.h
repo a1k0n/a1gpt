@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef CUDA
+#include <cuda_runtime.h>
+#endif
 
 #undef ALLOC_DEBUG
 
@@ -13,10 +16,18 @@ template <int N> struct Tensorf {
   int shape[N];
   float *data;
   float *alloc;
+#ifdef CUDA
+  float *gpu_data;
+  float *gpu_alloc;
+#endif
 
   Tensorf() {
     data = NULL;
     alloc = NULL;
+#ifdef CUDA
+    gpu_data = NULL;
+    gpu_alloc = NULL;
+#endif
   }
 
   Tensorf(float *_data, int i) {
@@ -24,6 +35,10 @@ template <int N> struct Tensorf {
     shape[0] = i;
     data = _data;
     alloc = NULL;
+#ifdef CUDA
+    gpu_data = NULL;
+    gpu_alloc = NULL;
+#endif
   }
 
   Tensorf(float *_data, int i, int j) {
@@ -32,29 +47,80 @@ template <int N> struct Tensorf {
     shape[1] = j;
     data = _data;
     alloc = NULL;
+#ifdef CUDA
+    gpu_data = NULL;
+    gpu_alloc = NULL;
+#endif
+  }
+
+  void _alloc(size_t nfloats) {
+#ifdef CUDA
+    _alloc_device(nfloats);
+    alloc = NULL;
+    data = NULL;
+#else
+    _alloc_local(nfloats);
+#endif
+  }
+
+  void _alloc_device(size_t nfloats) {
+#ifdef CUDA
+    if (cudaMalloc(&gpu_alloc, nfloats * sizeof(float)) != cudaSuccess) {
+      fprintf(stderr, "cudaMalloc failed: %s\n", cudaGetErrorString(cudaGetLastError()));
+      abort();
+    }
+    gpu_data = gpu_alloc;
+#else
+    _alloc_local(nfloats);
+#endif
+  }
+
+  void _alloc_local(size_t nfloats) {
+    // allocate aligned float array
+    alloc = new float[nfloats + 7];
+    data = (float *)(((uintptr_t)alloc + 31) & ~31);
+#ifdef ALLOC_DEBUG
+    printf("allocating (%d) %p -> %p\n", nfloats, alloc, data);
+#endif
+  }
+
+  bool copyToDevice() {
+#ifdef CUDA
+    if (gpu_data == NULL) {
+      _alloc_device(size());
+    }
+    if (cudaMemcpy(gpu_data, data, size() * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "cudaMemcpy failed: %s\n", cudaGetErrorString(cudaGetLastError()));
+      abort();
+    }
+#endif
+    return true;
+  }
+
+  bool copyToCpu() {
+#ifdef CUDA
+    if (data == NULL) {
+      _alloc_local(size());
+    }
+    if (cudaMemcpy(data, gpu_data, size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+      fprintf(stderr, "cudaMemcpy failed: %s\n", cudaGetErrorString(cudaGetLastError()));
+      abort();
+    }
+#endif
+    return true;
   }
 
   Tensorf(int i) {
     assert(N == 1);
     shape[0] = i;
-    // allocate aligned float array
-    alloc = new float[i + 7];
-    data = (float *)(((uintptr_t)alloc + 31) & ~31);
-#ifdef ALLOC_DEBUG
-    printf("allocating (%d) %p -> %p\n", i, alloc, data);
-#endif
+    _alloc(i);
   }
 
   Tensorf(int i, int j) {
     assert(N == 2);
     shape[0] = i;
     shape[1] = j;
-    // allocate aligned float array
-    alloc = new float[i * j + 7];
-    data = (float *)(((uintptr_t)alloc + 31) & ~31);
-#ifdef ALLOC_DEBUG
-    printf("allocating (%d, %d) %p -> %p\n", i, j, alloc, data);
-#endif
+    _alloc(i*j);
   }
 
   Tensorf(int i, int j, int k) {
@@ -62,12 +128,7 @@ template <int N> struct Tensorf {
     shape[0] = i;
     shape[1] = j;
     shape[2] = k;
-    // allocate aligned float array
-    alloc = new float[i * j * k + 7];
-    data = (float *)(((uintptr_t)alloc + 31) & ~31);
-#ifdef ALLOC_DEBUG
-    printf("allocating (%d, %d, %d) %p -> %p\n", i, j, k, alloc, data);
-#endif
+    _alloc(i*j*k);
   }
 
   Tensorf(const Tensorf<N> &other) {
@@ -76,6 +137,10 @@ template <int N> struct Tensorf {
     }
     data = other.data;
     alloc = other.alloc;
+#ifdef CUDA
+    gpu_data = other.gpu_data;
+    gpu_alloc = other.gpu_alloc;
+#endif
   }
 
   ~Tensorf() {
@@ -83,18 +148,28 @@ template <int N> struct Tensorf {
 #ifdef ALLOC_DEBUG
       printf("freeing %p\n", alloc);
 #endif
+#ifdef CUDA
+      if (alloc == gpu_data) {
+        cudaFree(gpu_data);
+        return;
+      }
+#endif
       delete[] alloc;
     }
   }
 
   void show() const {
+    if (data == NULL) {
+      printf("Tensorf: NULL\n");
+      return;
+    }
     if (N == 1) {
       int k = 10;
       if (shape[0] < k) {
         k = shape[0];
       }
       for (int i = 0; i < k; i++) {
-        printf("%f ", data[i]);
+        printf("%7.4f ", data[i]);
       }
       printf("\n");
     } else if (N == 2) {
@@ -108,7 +183,7 @@ template <int N> struct Tensorf {
       }
       for (int i = 0; i < ki; i++) {
         for (int j = 0; j < kj; j++) {
-          printf("%f ", data[i * shape[1] + j]);
+          printf("%7.4f ", data[i * shape[1] + j]);
         }
         printf("\n");
       }
@@ -144,8 +219,16 @@ template <int N> struct Tensorf {
       out.shape[j] = shape[j+1];
       stride *= shape[j+1];
     }
-    out.data = data + i * stride;
+    if (data != NULL) {
+      out.data = data + i * stride;
+    }
     out.alloc = NULL;
+#ifdef CUDA
+    if (gpu_data != NULL) {
+      out.gpu_data = gpu_data + i * stride;
+    }
+    out.gpu_alloc = NULL;
+#endif
     return out;
   }
 

@@ -78,6 +78,9 @@ bool load_gpt2_model(Model &m) {{
   fstat(fd, &sb);
   char *data = (char*) mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 
+  m.mmap_data = data;
+  m.mmap_siz = sb.st_size;
+
   m.embedding_dim = {embed_dim};
   m.context_len = {context_len};
   m.ntokens = {ntokens};
@@ -102,6 +105,7 @@ bool load_gpt2_model(Model &m) {{
                 bin_offset += add_weights(f"m.h[{i}].mlp.c_proj_bias", f"h.{i}.mlp.c_proj.bias")
                 bin_offset += add_weights_transposed(f"m.h[{i}].mlp.c_proj_weight", f"h.{i}.mlp.c_proj.weight")
             cpp_file.write('''
+  close(fd);
   return true;
 }
 ''')

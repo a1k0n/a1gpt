@@ -23,6 +23,9 @@ bool load_gpt2_model(Model &m) {
   fstat(fd, &sb);
   char *data = (char*) mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 
+  m.mmap_data = data;
+  m.mmap_siz = sb.st_size;
+
   m.embedding_dim = 768;
   m.context_len = 1024;
   m.ntokens = 50257;
@@ -188,5 +191,6 @@ bool load_gpt2_model(Model &m) {
   m.h[11].mlp.c_proj_bias        = Tensorf<1>((float*)(data + 0x1d1b2800), 768);
   m.h[11].mlp.c_proj_weight      = Tensorf<2>((float*)(data + 0x1d1b3400), 768, 3072);
 
+  close(fd);
   return true;
 }

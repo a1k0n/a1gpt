@@ -94,9 +94,9 @@ bool BPEEncoder::Init(const std::vector<std::string>& vocab) {
   return true;
 }
 
-int BPEEncoder::Encode(const char *string, int *outbuf, int outbuf_size) {
-  int ntokens = 0;
-  while(*string && ntokens < outbuf_size) {
+const char* BPEEncoder::Encode(const char *string, int *outbuf, int outbuf_size, int *ntokens) {
+  *ntokens = 0;
+  while(*string && *ntokens < outbuf_size) {
     BPETrieNode* node = root_;
     int last_token_length = -1;
     int last_token_id = -1;
@@ -112,12 +112,12 @@ int BPEEncoder::Encode(const char *string, int *outbuf, int outbuf_size) {
       }
     }
     if (last_token_length == -1) {
-      return ntokens;
+      return string;
     } else {
       *outbuf++ = last_token_id;
       string += last_token_length;
-      ntokens++;
+      (*ntokens)++;
     }
   }
-  return ntokens;
+  return string;
 }

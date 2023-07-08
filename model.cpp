@@ -1,7 +1,15 @@
 #include <math.h>
+#include <sys/mman.h>
 
 #include "blas.h"
 #include "model.h"
+
+Model::~Model() {
+  delete[] h;
+  if (mmap_data) {
+    munmap(mmap_data, mmap_siz);
+  }
+}
 
 void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
                                 int i, const Tensorf<2> &kvbuf) {
@@ -43,6 +51,10 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
       *kv++ = (*b++) + sdot(x, w, emb_siz);
       w += emb_siz;
     }
+    {
+      auto vbuf = kvbuf.slice(i);
+      vbuf.data += emb_siz;
+    }
   }
 
   // with all key-value entries populated, compute attention
@@ -70,6 +82,7 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
         float a = sdot(qk, kk, head_siz) * attn_scale;
         if (a > flashatt_m[h]) {
           float e = expf(flashatt_m[h] - a); // <1.0
+          // y = value + e*y
           sxpby(head_siz, kk + emb_siz, e, y);
           flashatt_l[h] = 1 + e*flashatt_l[h];
           flashatt_m[h] = a;
@@ -167,8 +180,8 @@ void MLPBlock::apply(const Tensorf<1> &out, const Tensorf<1> &in) {
   }
 }
 
-int Model::sample_head(Tensorf<1> &emb_in, float sampling_temperature,
-                       float uniform_sample, Tensorf<1> &logits) {
+void Model::apply_lm_head(Tensorf<1> &emb_in, Tensorf<1> &logits) {
+  assert(emb_in.shape[0] == embedding_dim);
   // layernorm and dot with embedding matrix
   ln_f.apply(emb_in, emb_in);
   const int ntokens = logits.shape[0];
@@ -181,11 +194,29 @@ int Model::sample_head(Tensorf<1> &emb_in, float sampling_temperature,
     }
     w += embedding_dim;
   }
+  // subtract max for numerical stability
+  for (int j = 0; j < ntokens; j++) {
+    logits[j] -= m;
+  }
+}
 
-  // sample from logits
+void Model::apply_transformer(int token_id, int input_pos,
+                              const Tensorf<3> &kvbuf,
+                              const Tensorf<1> &emb_out) {
+  for (int k = 0; k < embedding_dim; k++) {
+    emb_out[k] = wte_weight(token_id, k) + wpe_weight(input_pos, k);
+  }
+  for (int layer = 0; layer < 12; layer++) {
+    h[layer].apply(emb_out, input_pos, kvbuf.slice(layer));
+  }
+}
+
+int sample_logits(float sampling_temperature, float uniform_sample, Tensorf<1> &logits) {
+  // sample from logits (also normalizes logits to probabilities)
+  int ntokens = logits.shape[0];
   float sum = 0;
   for (int j = 0; j < ntokens; j++) {
-    logits[j] = expf((logits[j] - m) / sampling_temperature);
+    logits[j] = expf(logits[j] / sampling_temperature);
     sum += logits[j];
   }
   for (int j = 0; j < ntokens; j++) {
@@ -200,4 +231,13 @@ int Model::sample_head(Tensorf<1> &emb_in, float sampling_temperature,
   }
   fprintf(stderr, "[sampling error? r=%f, acc=%f]\n", uniform_sample, acc);
   return 0;
+}
+
+float cross_entropy(const Tensorf<1> &logits, int index) {
+  float sum = 0;
+  // max has already been subtracted, so we just need the log sum
+  for (int j = 0; j < logits.shape[0]; j++) {
+    sum += expf(logits[j]);
+  }
+  return logits[index] - logf(sum);
 }

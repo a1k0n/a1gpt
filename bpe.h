@@ -25,7 +25,8 @@ class BPEEncoder {
 
   bool Init(const std::vector<std::string> &vocab);
 
-  int Encode(const char *string, int *outbuf, int outbuf_size);
+  // returns unconsumed part of string
+  const char *Encode(const char *string, int *outbuf, int outbuf_size, int *ntokens);
 
  private:
   BPETrieNode *root_;

@@ -16,7 +16,8 @@ int main(int argc, char **argv) {
     prompt = argv[1];
   }
   int outbuf[1024];
-  int ntokens = encoder.Encode(prompt, outbuf, 1024);
+  int ntokens;
+  const char *leftover = encoder.Encode(prompt, outbuf, 1024, &ntokens);
   printf("encoding: ");
   for (int i = 0; i < ntokens; i++) {
     printf("%d ", outbuf[i]);
@@ -24,6 +25,24 @@ int main(int argc, char **argv) {
   printf("\n");
   char outbuf2[256];
   decoder.Decode(outbuf, ntokens, outbuf2, 256);
-  printf("%s\n", outbuf2);
+  printf("re-decoded: %s\n", outbuf2);
+
+  {
+    // test partial input
+    const char *prompt = "The rain in spain falls mainly on the";
+    for (;;) {
+      int buf[4];
+      prompt = encoder.Encode(prompt, buf, 4, &ntokens);
+      printf("partial-encoding(%d): ", ntokens);
+      for (int i = 0; i < ntokens; i++) {
+        printf("%d ", buf[i]);
+      }
+      if (!*prompt) {
+        break;
+      }
+      printf("\nleftover: %s\n", prompt);
+    }
+  }
+
   return 0;
 }
