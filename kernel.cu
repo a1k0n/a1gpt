@@ -34,33 +34,38 @@ void loadEmbedding(float *output, int token, int pos, int embeddingSize, float* 
     loadEmbeddingKernel<<<1, embeddingSize>>>(output, token, pos, embeddingSize, wte, wpe);
 }
 
-__global__ void layerNormKernel(float* output, float* gamma, float* beta, float* input) {
+__global__ void layerNormKernel8(float* output, float* gamma, float* beta, float* input) {
     const int index = threadIdx.x;
     const int siz = blockDim.x;
+    const int k = index*8;
+    float *x = input + k;
 
     // shared memory reduction of mean and variance (requires 10 iterations for any embedding >512, <=1024)
     float *shared_mean = shared_buf;
     float *shared_var = shared_buf + siz;
 
-    shared_mean[index] = input[index];
-    shared_var[index] = input[index] * input[index];
+    shared_mean[index] = x[0] + x[1] + x[2] + x[3] + x[4] + x[5] + x[6] + x[7];
+    shared_var[index] = x[0]*x[0] + x[1]*x[1] + x[2]*x[2] + x[3]*x[3] +
+                        x[4]*x[4] + x[5]*x[5] + x[6]*x[6] + x[7]*x[7];
 
     // sums both mean and variance assuming they are contiguous in shared
     // memory, which they are
     sumSharedMem2(shared_buf, index, siz);
 
-    float mean = shared_mean[0] / siz;
-    float variance = shared_var[0] / siz - mean * mean;
+    float mean = shared_mean[0] / (8*siz);
+    float variance = shared_var[0] / (8*siz) - mean * mean;
     const float eps = 1e-5f;
     float stddev = sqrt(variance + eps);  // Small constant for numerical stability
 
     // Normalize input and store in output
-    output[index] = (input[index] - mean) / stddev * gamma[index] + beta[index];
+    for (int i = 0; i < 8; i++) {
+        output[k+i] = (x[i] - mean) / stddev * gamma[k+i] + beta[k+i];
+    }
 }
 
 void layerNorm(float* output, int embedding_dim, float* gamma, float* beta, float* input) {
-    size_t shared_siz = embedding_dim * 2 * sizeof(float);
-    layerNormKernel<<<1, embedding_dim, shared_siz>>>(output, gamma, beta, input);
+    size_t shared_siz = embedding_dim * 2 * sizeof(float) / 8;
+    layerNormKernel8<<<1, embedding_dim / 8, shared_siz>>>(output, gamma, beta, input);
     if (cudaPeekAtLastError() != cudaSuccess) {
         fprintf(stderr, "Error in layerNormKernel\n");
         abort();
@@ -68,15 +73,18 @@ void layerNorm(float* output, int embedding_dim, float* gamma, float* beta, floa
 }
 
 // compute q and kv by applying weight matrix / bias vector
-__global__ void qkvKernel(float* xbuf, float *qbuf, float* kvbuf,
-                          float* attn_weight, float* attn_bias) {
+__global__ void qkvKernel4(float* xbuf, float *qbuf, float* kvbuf,
+                           float* attn_weight, float* attn_bias) {
     const int k = threadIdx.x;
     const int j = blockIdx.x;
-    const int siz = blockDim.x;
+    const int siz = blockDim.x*4;
+
+    float *A = attn_weight + (j * siz) + k * 4;
+    float *x = xbuf + k*4;
 
     // compute q[j] and kv[j] in parallel
-    shared_buf[k] = xbuf[k] * attn_weight[j * siz + k];
-    sumSharedMem(shared_buf, k, siz);
+    shared_buf[k] = A[0]*x[0] + A[1]*x[1] + A[2]*x[2] + A[3]*x[3];
+    sumSharedMem(shared_buf, k, blockDim.x);
     // accumulate and sum
     if (j < siz) {
         qbuf[j] = shared_buf[0] + attn_bias[j];
@@ -88,8 +96,8 @@ __global__ void qkvKernel(float* xbuf, float *qbuf, float* kvbuf,
 void qkv(int kv_idx, float* xbuf, float *qbuf, float* kvbuf,
          float* attn_weight, float* attn_bias, int embedding_dim) {
 
-    size_t sharedbuf_siz = embedding_dim * sizeof(float);
-    qkvKernel<<<embedding_dim * 3, embedding_dim, sharedbuf_siz>>>(
+    size_t sharedbuf_siz = embedding_dim * sizeof(float) / 4;
+    qkvKernel4<<<embedding_dim * 3, embedding_dim / 4, sharedbuf_siz>>>(
         xbuf, qbuf, kvbuf + kv_idx * 2*embedding_dim, attn_weight, attn_bias);
 
     if (cudaPeekAtLastError() != cudaSuccess) {
@@ -156,12 +164,15 @@ void attn(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int n
     }
 }
 
-__global__ void gemvKernel(float *y, float *A, float *x, float *b) {
+__global__ void gemvKernel4(float *y, float *A, float *x, float *b) {
     int i = threadIdx.x;
     int j = blockIdx.x;
     int k = blockDim.x;
 
-    shared_buf[i] = A[j * k + i] * x[i];
+    A += (j*k + i) * 4;
+    x += i*4;
+
+    shared_buf[i] = A[0]*x[0] + A[1]*x[1] + A[2]*x[2] + A[3]*x[3];
     sumSharedMem(shared_buf, i, k);
     if (i == 0) {
         float z = shared_buf[0];
@@ -172,42 +183,30 @@ __global__ void gemvKernel(float *y, float *A, float *x, float *b) {
     }
 }
 
-__global__ void gemvSumKernel(float *y, float *A, float *x, float *b) {
+__global__ void gemvSumKernel4(float *y, float *A, float *x, float *b) {
     int i = threadIdx.x;
     int j = blockIdx.x;
     int k = blockDim.x;
 
-    shared_buf[i] = A[j * k + i] * x[i];
+    A += (j*k + i) * 4;
+    x += i*4;
+
+    shared_buf[i] = A[0]*x[0] + A[1]*x[1] + A[2]*x[2] + A[3]*x[3];
     sumSharedMem(shared_buf, i, k);
     if (i == 0) {
         y[j] += shared_buf[0] + b[j];
     }
 }
 
-__global__ void gemvSumKernelN(float *y, float *A, float *x, float *b, int n) {
+__global__ void gemvGeluKernel4(float *y, float *A, float *x, float *b) {
     int i = threadIdx.x;
     int j = blockIdx.x;
     int k = blockDim.x;
 
-    A += (j*k + i) * n;
-    x += i*n;
-    float sum = 0;
-    while (n--) {
-        sum += *A++ * *x++;
-    }
-    shared_buf[i] = sum;
-    sumSharedMem(shared_buf, i, k);
-    if (i == 0) {
-        y[j] += shared_buf[0] + b[j];
-    }
-}
+    A += 4*(j*k + i);
+    x += 4*i;
 
-__global__ void gemvGeluKernel(float *y, float *A, float *x, float *b) {
-    int i = threadIdx.x;
-    int j = blockIdx.x;
-    int k = blockDim.x;
-
-    shared_buf[i] = A[j * k + i] * x[i];
+    shared_buf[i] = A[0]*x[0] + A[1]*x[1] + A[2]*x[2] + A[3]*x[3];
     sumSharedMem(shared_buf, i, k);
     if (i == 0) {
         float z = shared_buf[0] + b[j];
@@ -221,8 +220,8 @@ __global__ void gemvGeluKernel(float *y, float *A, float *x, float *b) {
 // x is k x 1
 // b is m x 1
 void gemv(float *y, float *A, float *x, float *b, int m, int k) {
-    size_t shared_siz = k * sizeof(float);
-    gemvKernel<<<m, k, shared_siz>>>(y, A, x, b);
+    size_t shared_siz = k * sizeof(float) / 4;
+    gemvKernel4<<<m, k / 4, shared_siz>>>(y, A, x, b);
     if (cudaPeekAtLastError() != cudaSuccess) {
         fprintf(stderr, "Error in gemvKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
         abort();
@@ -230,15 +229,8 @@ void gemv(float *y, float *A, float *x, float *b, int m, int k) {
 }
 
 void gemvSum(float *y, float *A, float *x, float *b, int m, int k) {
-    if (k > 1024) {
-        int stride = 1 + (k >> 10);
-        int sub_k = k / stride;
-        size_t shared_siz = sub_k * sizeof(float);
-        gemvSumKernelN<<<m, sub_k, shared_siz>>>(y, A, x, b, stride);
-    } else {
-        size_t shared_siz = k * sizeof(float);
-        gemvSumKernel<<<m, k, shared_siz>>>(y, A, x, b);
-    }
+    size_t shared_siz = k * sizeof(float) / 4;
+    gemvSumKernel4<<<m, k / 4, shared_siz>>>(y, A, x, b);
     if (cudaPeekAtLastError() != cudaSuccess) {
         fprintf(stderr, "Error in gemvKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
         abort();
@@ -246,8 +238,8 @@ void gemvSum(float *y, float *A, float *x, float *b, int m, int k) {
 }
 
 void gemvGelu(float *y, float *A, float *x, float *b, int m, int k) {
-    size_t shared_siz = k * sizeof(float);
-    gemvGeluKernel<<<m, k, shared_siz>>>(y, A, x, b);
+    size_t shared_siz = k * sizeof(float) / 4;
+    gemvGeluKernel4<<<m, k/4, shared_siz>>>(y, A, x, b);
     if (cudaPeekAtLastError() != cudaSuccess) {
         fprintf(stderr, "Error in gemvKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
         abort();

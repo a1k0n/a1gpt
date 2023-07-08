@@ -71,7 +71,6 @@ void Model::apply_lm_head(Tensorf<1> &emb_in, Tensorf<1> &logits) {
   // layernorm and dot with embedding matrix
   ln_f.apply(emb_in, emb_in);
   const int ntokens = logits.shape[0];
-  float *w = wte_weight.data;
   float m = -INFINITY;
   gemv(logits.gpu_data, wte_weight.gpu_data, emb_in.gpu_data, NULL, ntokens, embedding_dim);
   logits.copyToCpu();
@@ -79,7 +78,6 @@ void Model::apply_lm_head(Tensorf<1> &emb_in, Tensorf<1> &logits) {
     if (logits[j] > m) {
       m = logits[j];
     }
-    w += embedding_dim;
   }
   // subtract max for numerical stability
   for (int j = 0; j < ntokens; j++) {
