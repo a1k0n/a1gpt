@@ -11,3 +11,4 @@ extern void gemvSum(float *y, float *A, float *x, float *b, int m, int k);
 extern void gemvGelu(float *y, float *A, float *x, float *b, int m, int k);
 
 extern void attn(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int num_heads);
+extern void attn2(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int num_heads);

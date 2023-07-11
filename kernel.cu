@@ -3,21 +3,51 @@
 extern __shared__ float shared_buf[];
 
 __device__ void sumSharedMem(float *shared, int index, int siz) {
+    shared += index;
     __syncthreads();
     for (int i = 1; i < siz; i <<= 1) {
         if ((index & i) == 0 && index + i < siz) {
-            shared[index] += shared[index + i];
+            shared[0] += shared[i];
         }
         __syncthreads();
     }
 }
 
 __device__ void sumSharedMem2(float* shared, int index, int siz) {
+    shared += index;
     __syncthreads();
     for (int i = 1; i < siz; i <<= 1) {
         if ((index & i) == 0 && index + i < siz) {
-            shared[index] += shared[index + i];
-            shared[index + siz] += shared[index + i + siz];
+            shared[0] += shared[i];
+            shared[siz] += shared[siz + i];
+        }
+        __syncthreads();
+    }
+}
+
+// aggregate two partial softmax values
+// m(x) = m([x1 x2]) = max(m(x1), m(x2))
+// f(x) = [exp(m(x1)-m(x)) f(x1)
+__device__ inline void aggregateSoftmax4(float *m, float m2, float *l, float l2, float *v, const float *v2) {
+    float newm = m2 > *m ? m2 : *m;
+    float e1 = __expf(*m - newm);
+    float e2 = __expf(m2 - newm);
+    *l = e1* *l + e2*l2;
+    *m = newm;
+    v[0] = e1 * v[0] + e2 * v2[0];
+    v[1] = e1 * v[1] + e2 * v2[1];
+    v[2] = e1 * v[2] + e2 * v2[2];
+    v[3] = e1 * v[3] + e2 * v2[3];
+}
+
+__device__ void aggregateSharedSoftmax4(float *mlv, int i, int stride, int index, int siz) {
+    mlv += index*stride;
+    __syncthreads();
+    for (int j = 1; j < siz; j <<= 1, stride <<= 1) {
+        if ((index & j) == 0 && index + j < siz) {
+            aggregateSoftmax4(mlv, mlv[stride],                    // *m, m2
+                              mlv + 1, mlv[stride + 1],            // *l, l2
+                              mlv + 2 + i, mlv + stride + 2 + i);  // v[], v2[]
         }
         __syncthreads();
     }
@@ -81,6 +111,9 @@ __global__ void qkvKernel4(float* xbuf, float *qbuf, float* kvbuf,
 
     float *A = attn_weight + (j * siz) + k * 4;
     float *x = xbuf + k*4;
+
+    // TODO: do sum within warp before accumulating across shared memory
+    // using __shfl_down_sync (but we need to know our warp mask)
 
     // compute q[j] and kv[j] in parallel
     shared_buf[k] = A[0]*x[0] + A[1]*x[1] + A[2]*x[2] + A[3]*x[3];
@@ -158,6 +191,215 @@ void attn(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int n
     int head_siz = emb_siz / num_heads;
     size_t sharedbuf_siz = head_siz * sizeof(float);
     attnKernel<<<num_heads, head_siz, sharedbuf_siz>>>(kv_idx, xbuf, qbuf, kvbuf, emb_siz);
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        fprintf(stderr, "Error in attnKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
+        abort();
+    }
+}
+
+__global__ void attn2Kernel(int kv_idx, float *out_mlv, float *qbuf, float *kvbuf, int emb_siz) {
+    int i = threadIdx.x*4;
+    int j = threadIdx.y;
+    int h = blockIdx.x;
+    int b = blockIdx.y;
+    int head_siz = blockDim.x*4;
+    int nblocks = gridDim.y;
+    int nkvs = kv_idx+1;
+
+    // which key/value is this thread looking at?
+    int kvs_per_block = blockDim.y;
+    int kv_offset = b*kvs_per_block + j;
+    if (kv_offset >= nkvs) {
+        return;
+    }
+    int kvs_this_block = kvs_per_block;
+    // ideally (b+1) * kvs_per_block == nkvs on the last block, but
+    // we might have some leftovers on the last block
+    if ((b+1)*kvs_per_block > nkvs) {
+        kvs_this_block = nkvs - b*kvs_per_block;
+    }
+
+    // we are computing attention for 0..kv_idx but in blocks
+
+    // offset inputs/outputs by our attention head position
+    qbuf += h * head_siz;
+    kvbuf += h * head_siz + kv_offset * emb_siz * 2;
+    // we are going to compute q*k[j, i:i+4] in this kernel,
+    // then sum up a = q*k among our thread group j
+    float *shared_a = shared_buf + j*(head_siz+2);
+    float attn_scale = 1.0f / sqrtf(head_siz);
+    {
+        float *q = qbuf + i;
+        float *k = kvbuf + i;
+        float z = q[0]*k[0] + q[1]*k[1] + q[2]*k[2] + q[3]*k[3];
+        shared_a[threadIdx.x] = z;
+        sumSharedMem(shared_a, threadIdx.x, blockDim.x);
+    }
+    float a = shared_a[0] * attn_scale;
+
+    // we've computed a, so re-use the shared buf for m, l, v aggregation
+    float *shared_m = shared_a;
+    float *shared_l = shared_a+1;
+    float *shared_v = shared_a+2;
+
+    // init our own m, l, v and aggregate them between all thread groups in the block
+    *shared_m = a;
+    *shared_l = 1;
+    shared_v[i] = kvbuf[i + emb_siz];
+    shared_v[i+1] = kvbuf[i + emb_siz + 1];
+    shared_v[i+2] = kvbuf[i + emb_siz + 2];
+    shared_v[i+3] = kvbuf[i + emb_siz + 3];
+
+    // now aggregate all mlvs
+    aggregateSharedSoftmax4(shared_buf,       // mlv
+                            i,                // inner index
+                            head_siz + 2,     // stride
+                            j,                // outer index
+                            kvs_this_block);  // siz
+
+    // once we've aggregated all mlv for this block, the first kv threads can write the output
+    if (j == 0) {
+        // mlv layout:
+        // head 0: <<block 0: l, m, v>, <block 1: l, m, v>, ...>>
+        // a future reduction step will combine softmax across blocks
+        out_mlv += (h * nblocks + b) * (2 + head_siz);
+        float *out_m = out_mlv;
+        float *out_l = out_mlv + 1;
+        float *out_v = out_mlv + 2;
+
+        *out_m = *shared_m;
+        *out_l = *shared_l;
+        out_v[i] = shared_v[i];
+        out_v[i+1] = shared_v[i+1];
+        out_v[i+2] = shared_v[i+2];
+        out_v[i+3] = shared_v[i+3];
+    }
+}
+
+__global__ void attn2AggregateKernel(int nkvs, float *xbuf, float *mlv) {
+    // aggregate across blocks, solving final value for our attention head, and
+    // place the result in xbuf
+    // one block per head
+    int i = threadIdx.x*4;
+    int j = threadIdx.y;
+    int h = blockIdx.x;
+    int head_siz = blockDim.x*4;
+
+    // N.B. number of blocks from the previous kernel we're aggregating here;
+    // this kernel has one block per head
+    int nblocks = blockDim.y;
+
+    // mlv array for this head
+    mlv += (head_siz + 2) * (h * nblocks + j*2);
+
+    float *shared_mlv = shared_buf;
+    int shr_off = j * (head_siz + 2);
+    if (i == 0) {
+        shared_mlv[shr_off] = mlv[0];
+        shared_mlv[shr_off + 1] = mlv[1];
+    }
+    shared_mlv[shr_off + 2 + i] = mlv[2 + i];
+    shared_mlv[shr_off + 2 + i + 1] = mlv[2 + i + 1];
+    shared_mlv[shr_off + 2 + i + 2] = mlv[2 + i + 2];
+    shared_mlv[shr_off + 2 + i + 3] = mlv[2 + i + 3];
+    if (j*2+1 < nkvs) {
+        // get the next odd mlv value which we will immediately merge into our even one
+        float *mlv2 = mlv + (head_siz + 2);
+        aggregateSoftmax4(shared_mlv + shr_off, mlv2[0],      // *m, m2
+                          shared_mlv + shr_off + 1, mlv2[1],  // *l, l2
+                          shared_mlv + shr_off + 2 + i,       // v[]
+                          mlv2 + 2 + i);                      // v2[]
+    }
+    aggregateSharedSoftmax4(shared_mlv, i, head_siz + 2, j, nblocks);
+
+    // copy shared_mlv+2 into our xbuf head
+    if (j == 0) {
+        float scale = 1.0 / shared_mlv[1];
+        xbuf[h * head_siz + i] = shared_mlv[2 + i] * scale;
+        xbuf[h * head_siz + i + 1] = shared_mlv[2 + i + 1] * scale;
+        xbuf[h * head_siz + i + 2] = shared_mlv[2 + i + 2] * scale;
+        xbuf[h * head_siz + i + 3] = shared_mlv[2 + i + 3] * scale;
+    }
+}
+
+void attn2(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int num_heads) {
+    int head_siz = emb_siz / num_heads;
+    // calc how many kvs we can do in one block based on the shared memory available
+    int max_sharedbuf_siz;
+    if (cudaDeviceGetAttribute(&max_sharedbuf_siz, cudaDevAttrMaxSharedMemoryPerBlock, 0) != cudaSuccess) {
+        fprintf(stderr, "Error getting max shared memory per block\n");
+        abort();
+    }
+    int nblocks = 8;
+    if ((kv_idx+1) < nblocks) {
+        nblocks = kv_idx+1;
+    }
+    int threads_per_kv = head_siz / 4;
+    int max_kvs_per_block = 512 / threads_per_kv;
+    int kvs_per_block = 1 + kv_idx / nblocks;
+    if (kvs_per_block > max_kvs_per_block) {
+        kvs_per_block = max_kvs_per_block;
+    }
+    nblocks = 1 + kv_idx / kvs_per_block;
+    int threads_per_block = threads_per_kv * kvs_per_block;
+    if (threads_per_block > 1024) {
+        // this could be handled by adding more blocks, but in GPT-2 we don't
+        // have enough context length to justify it
+        fprintf(stderr, "Error: too many threads per block\n");
+        abort();
+    }
+    int sharedbuf_siz = (2 + head_siz) * kvs_per_block * sizeof(float);
+
+    float *tmpBuf;
+    // tmpbuf is laid out like
+    // head 0: <<block 0: l, m, v>, <block 1: l, m, v>, ...>>
+    if (cudaMalloc(&tmpBuf, nblocks * num_heads * (2 + head_siz) * sizeof(float)) != cudaSuccess) {
+        fprintf(stderr, "Error allocating temporary buffer\n");
+        abort();
+    }
+    cudaMemset(tmpBuf, 0, nblocks * num_heads * (2 + head_siz) * sizeof(float));
+
+#if 0
+    printf("attn2Kernel<<<(%d, %d), (%d, %d), %d>>>(%d, %p, %p, %p, %d)\n",
+           num_heads, nblocks, threads_per_kv, kvs_per_block, sharedbuf_siz,
+           kv_idx, tmpBuf, qbuf, kvbuf, emb_siz);
+#endif
+    attn2Kernel<<<dim3(num_heads, nblocks), dim3(threads_per_kv, kvs_per_block), sharedbuf_siz>>>(
+        kv_idx, tmpBuf, qbuf, kvbuf, emb_siz);
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        fprintf(stderr, "Error in attnKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
+        abort();
+    }
+
+#if 0
+    // print out some of tmpbuf for debugging
+    printf(
+        "tmpbuf: kv_idx=%d nblocks=%d num_heads=%d head_siz=%d "
+        "kvs_per_block=%d\n",
+        kv_idx, nblocks, num_heads, head_siz, kvs_per_block);
+    for (int b = 0; b < nblocks; b++) {
+        float tmp[4];
+        cudaMemcpy(tmp, tmpBuf + b * (head_siz + 2), 4 * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        printf("block[%d] = m:%f l:%f v:%f %f\n", b, tmp[0], tmp[1], tmp[2],
+               tmp[3]);
+    }
+#endif
+
+    int naggr_groups = (1 + nblocks) / 2;
+    int shared2_siz = (2 + head_siz) * naggr_groups * sizeof(float);
+    // this should be impossible as the largest possible number of blocks is 16 with 1024 context
+    if (shared2_siz > max_sharedbuf_siz) {
+        fprintf(stderr, "Error: too much shared memory required for attn2AggregateKernel\n");
+        abort();
+    }
+#if 0
+    printf("attn2Aggregate<<<%d, (%d, %d), %d>>>(%d, %p, %p)\n", num_heads, threads_per_kv, naggr_groups, shared2_siz, kv_idx+1, xbuf, tmpBuf);
+#endif
+    attn2AggregateKernel<<<num_heads, dim3(threads_per_kv, naggr_groups), shared2_siz>>>(kv_idx+1, xbuf, tmpBuf);
+
+
+    cudaFree(tmpBuf);
     if (cudaPeekAtLastError() != cudaSuccess) {
         fprintf(stderr, "Error in attnKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
         abort();
