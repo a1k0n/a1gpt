@@ -73,7 +73,6 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
       qk += head_siz;
       kk += head_siz;
     }
-    printf("flashatt a[0]: %f\n", flashatt_m[0]);
     for (int j = 1; j <= i; j++) {
       float *qk = qbuf.data;
       float *kk = &kvbuf(j, 0);
@@ -81,9 +80,6 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
       float *y = ybuf.data;
       for (int h = 0; h < num_heads; h++) {
         float a = sdot(qk, kk, head_siz) * attn_scale;
-        if (h == 0) {
-          printf("flashatt a[%d]: %f %f\n", j, a, flashatt_m[h]);
-        }
         if (a > flashatt_m[h]) {
           float e = expf(flashatt_m[h] - a); // <1.0
           // y = value + e*y
@@ -92,13 +88,7 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
           flashatt_m[h] = a;
         } else {
           float e = expf(a - flashatt_m[h]); // <1.0
-          if (h == 0) {
-            printf("y <- [%f %f] + %f*[%f %f...]", y[0], y[1], e, kk[emb_siz], kk[emb_siz+1]);
-          }
           saxpy(head_siz, e, kk + emb_siz, y);
-          if (h == 0) {
-            printf(" = [%f %f...]\n", y[0], y[1]);
-          }
           flashatt_l[h] += e;
         }
         y += head_siz;
@@ -111,9 +101,6 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
     for (int h = 0; h < num_heads; h++) {
       float scale = 1.0 / flashatt_l[h];
       sscal(head_siz, scale, y);
-      if (h == 0) {
-        printf("flashatt l: %f; scaled y = [%f, %f...]\n", flashatt_l[h], y[0], y[1]);
-      }
       y += head_siz;
     }
   }
@@ -220,7 +207,6 @@ void Model::apply_transformer(int token_id, int input_pos,
     emb_out[k] = wte_weight(token_id, k) + wpe_weight(input_pos, k);
   }
   for (int layer = 0; layer < 12; layer++) {
-    printf("\n--- layer %d\n", layer);
     h[layer].apply(emb_out, input_pos, kvbuf.slice(layer));
   }
 }

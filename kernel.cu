@@ -276,7 +276,7 @@ __global__ void attn2Kernel(int kv_idx, float *out_mlv, float *qbuf, float *kvbu
     }
 }
 
-__global__ void attn2AggregateKernel(int nkvs, float *xbuf, float *mlv) {
+__global__ void attn2AggregateKernel(int nblocks, float *xbuf, float *mlv) {
     // aggregate across blocks, solving final value for our attention head, and
     // place the result in xbuf
     // one block per head
@@ -284,10 +284,6 @@ __global__ void attn2AggregateKernel(int nkvs, float *xbuf, float *mlv) {
     int j = threadIdx.y;
     int h = blockIdx.x;
     int head_siz = blockDim.x*4;
-
-    // N.B. number of blocks from the previous kernel we're aggregating here;
-    // this kernel has one block per head
-    int nblocks = blockDim.y;
 
     // mlv array for this head
     mlv += (head_siz + 2) * (h * nblocks + j*2);
@@ -302,7 +298,7 @@ __global__ void attn2AggregateKernel(int nkvs, float *xbuf, float *mlv) {
     shared_mlv[shr_off + 2 + i + 1] = mlv[2 + i + 1];
     shared_mlv[shr_off + 2 + i + 2] = mlv[2 + i + 2];
     shared_mlv[shr_off + 2 + i + 3] = mlv[2 + i + 3];
-    if (j*2+1 < nkvs) {
+    if (j*2+1 < nblocks) {
         // get the next odd mlv value which we will immediately merge into our even one
         float *mlv2 = mlv + (head_siz + 2);
         aggregateSoftmax4(shared_mlv + shr_off, mlv2[0],      // *m, m2
@@ -310,7 +306,7 @@ __global__ void attn2AggregateKernel(int nkvs, float *xbuf, float *mlv) {
                           shared_mlv + shr_off + 2 + i,       // v[]
                           mlv2 + 2 + i);                      // v2[]
     }
-    aggregateSharedSoftmax4(shared_mlv, i, head_siz + 2, j, nblocks);
+    aggregateSharedSoftmax4(shared_mlv, i, head_siz + 2, j, blockDim.y);
 
     // copy shared_mlv+2 into our xbuf head
     if (j == 0) {
@@ -377,12 +373,14 @@ void attn2(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int 
         "tmpbuf: kv_idx=%d nblocks=%d num_heads=%d head_siz=%d "
         "kvs_per_block=%d\n",
         kv_idx, nblocks, num_heads, head_siz, kvs_per_block);
-    for (int b = 0; b < nblocks; b++) {
-        float tmp[4];
-        cudaMemcpy(tmp, tmpBuf + b * (head_siz + 2), 4 * sizeof(float),
-                   cudaMemcpyDeviceToHost);
-        printf("block[%d] = m:%f l:%f v:%f %f\n", b, tmp[0], tmp[1], tmp[2],
-               tmp[3]);
+    for (int h = 0; h < 2; h++) {
+        for (int b = 0; b < nblocks; b++) {
+            float tmp[4];
+            cudaMemcpy(tmp, tmpBuf + (h * nblocks + b) * (head_siz + 2), 4 * sizeof(float),
+                    cudaMemcpyDeviceToHost);
+            printf("head[%d] block[%d] = m:%f l:%f v:%f %f\n", h, b, tmp[0], tmp[1], tmp[2],
+                tmp[3]);
+        }
     }
 #endif
 
@@ -396,8 +394,16 @@ void attn2(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int 
 #if 0
     printf("attn2Aggregate<<<%d, (%d, %d), %d>>>(%d, %p, %p)\n", num_heads, threads_per_kv, naggr_groups, shared2_siz, kv_idx+1, xbuf, tmpBuf);
 #endif
-    attn2AggregateKernel<<<num_heads, dim3(threads_per_kv, naggr_groups), shared2_siz>>>(kv_idx+1, xbuf, tmpBuf);
+    attn2AggregateKernel<<<num_heads, dim3(threads_per_kv, naggr_groups), shared2_siz>>>(nblocks, xbuf, tmpBuf);
 
+#if 0
+    for (int h = 0; h < 2; h++) {
+        float tmp[4];
+        cudaMemcpy(tmp, xbuf + h * head_siz, 4 * sizeof(float),
+                cudaMemcpyDeviceToHost);
+        printf("xbuf head[%d] = %f %f %f %f...\n", h, tmp[0], tmp[1], tmp[2], tmp[3]);
+    }
+#endif
 
     cudaFree(tmpBuf);
     if (cudaPeekAtLastError() != cudaSuccess) {

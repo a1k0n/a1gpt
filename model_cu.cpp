@@ -29,6 +29,8 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
   attn2(i, ybuf.gpu_data, qbuf.gpu_data, kvbuf.gpu_data, emb_siz, num_heads);
 #if 0
   ybuf.copyToCpu();
+  qbuf.copyToCpu();
+  printf(" qbuf(%d): ", i); qbuf.show();
   printf("attn2(%d): ", i); ybuf.show();
 #endif
   //attn(i, ybuf.gpu_data, qbuf.gpu_data, kvbuf.gpu_data, emb_siz, num_heads);

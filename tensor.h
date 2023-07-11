@@ -164,7 +164,7 @@ template <int N> struct Tensorf {
       return;
     }
     if (N == 1) {
-      int k = 10;
+      int k = 128;
       if (shape[0] < k) {
         k = shape[0];
       }
