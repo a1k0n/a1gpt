@@ -27,7 +27,8 @@ __device__ void sumSharedMem2(float* shared, int index, int siz) {
 
 // aggregate two partial softmax values
 // m(x) = m([x1 x2]) = max(m(x1), m(x2))
-// f(x) = [exp(m(x1)-m(x)) f(x1)
+// l(x) = l([x1 x2]) = e^(m(x1) - m(x)) * l(x1) + e^(m(x2) - m(x)) * l(x2)
+// v(x) = v([x1 x2]) = e^(m(x1) - m(x)) * v(x1) + e^(m(x2) - m(x)) * v(x2)
 __device__ inline void aggregateSoftmax4(float *m, float m2, float *l, float l2, float *v, const float *v2) {
     float newm = m2 > *m ? m2 : *m;
     float e1 = __expf(*m - newm);
@@ -355,34 +356,12 @@ void attn2(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int 
     }
     cudaMemset(tmpBuf, 0, nblocks * num_heads * (2 + head_siz) * sizeof(float));
 
-#if 0
-    printf("attn2Kernel<<<(%d, %d), (%d, %d), %d>>>(%d, %p, %p, %p, %d)\n",
-           num_heads, nblocks, threads_per_kv, kvs_per_block, sharedbuf_siz,
-           kv_idx, tmpBuf, qbuf, kvbuf, emb_siz);
-#endif
     attn2Kernel<<<dim3(num_heads, nblocks), dim3(threads_per_kv, kvs_per_block), sharedbuf_siz>>>(
         kv_idx, tmpBuf, qbuf, kvbuf, emb_siz);
     if (cudaPeekAtLastError() != cudaSuccess) {
         fprintf(stderr, "Error in attnKernel: %s\n", cudaGetErrorString(cudaGetLastError()));
         abort();
     }
-
-#if 0
-    // print out some of tmpbuf for debugging
-    printf(
-        "tmpbuf: kv_idx=%d nblocks=%d num_heads=%d head_siz=%d "
-        "kvs_per_block=%d\n",
-        kv_idx, nblocks, num_heads, head_siz, kvs_per_block);
-    for (int h = 0; h < 2; h++) {
-        for (int b = 0; b < nblocks; b++) {
-            float tmp[4];
-            cudaMemcpy(tmp, tmpBuf + (h * nblocks + b) * (head_siz + 2), 4 * sizeof(float),
-                    cudaMemcpyDeviceToHost);
-            printf("head[%d] block[%d] = m:%f l:%f v:%f %f\n", h, b, tmp[0], tmp[1], tmp[2],
-                tmp[3]);
-        }
-    }
-#endif
 
     int naggr_groups = (1 + nblocks) / 2;
     int shared2_siz = (2 + head_siz) * naggr_groups * sizeof(float);
@@ -391,19 +370,7 @@ void attn2(int kv_idx, float *xbuf, float *qbuf, float *kvbuf, int emb_siz, int 
         fprintf(stderr, "Error: too much shared memory required for attn2AggregateKernel\n");
         abort();
     }
-#if 0
-    printf("attn2Aggregate<<<%d, (%d, %d), %d>>>(%d, %p, %p)\n", num_heads, threads_per_kv, naggr_groups, shared2_siz, kv_idx+1, xbuf, tmpBuf);
-#endif
     attn2AggregateKernel<<<num_heads, dim3(threads_per_kv, naggr_groups), shared2_siz>>>(nblocks, xbuf, tmpBuf);
-
-#if 0
-    for (int h = 0; h < 2; h++) {
-        float tmp[4];
-        cudaMemcpy(tmp, xbuf + h * head_siz, 4 * sizeof(float),
-                cudaMemcpyDeviceToHost);
-        printf("xbuf head[%d] = %f %f %f %f...\n", h, tmp[0], tmp[1], tmp[2], tmp[3]);
-    }
-#endif
 
     cudaFree(tmpBuf);
     if (cudaPeekAtLastError() != cudaSuccess) {

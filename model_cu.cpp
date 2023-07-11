@@ -27,15 +27,6 @@ void CausalSelfAttention::apply(const Tensorf<1> &out, const Tensorf<1> &xbuf,
   qkv(i, xbuf.gpu_data, qbuf.gpu_data, kvbuf.gpu_data, c_attn_weight.gpu_data, c_attn_bias.gpu_data, emb_siz);
   // y = attn(qbuf, kvbuf[i])
   attn2(i, ybuf.gpu_data, qbuf.gpu_data, kvbuf.gpu_data, emb_siz, num_heads);
-#if 0
-  ybuf.copyToCpu();
-  qbuf.copyToCpu();
-  printf(" qbuf(%d): ", i); qbuf.show();
-  printf("attn2(%d): ", i); ybuf.show();
-#endif
-  //attn(i, ybuf.gpu_data, qbuf.gpu_data, kvbuf.gpu_data, emb_siz, num_heads);
-  //ybuf.copyToCpu();
-  //printf(" attn(%d): ", i); ybuf.show();
   // x += proj(y)
   gemvSum(out.gpu_data, c_proj_weight.gpu_data,
           ybuf.gpu_data, c_proj_bias.gpu_data, emb_siz,
@@ -71,9 +62,6 @@ void Model::apply_transformer(int token_id, int input_pos,
   loadEmbedding(emb_out.gpu_data, token_id, input_pos, embedding_dim,
                 wte_weight.gpu_data, wpe_weight.gpu_data);
   for (int layer = 0; layer < 12; layer++) {
-#if 0
-    printf("\n---layer %d\n", layer);
-#endif
     h[layer].apply(emb_out, input_pos, kvbuf.slice(layer));
   }
 }

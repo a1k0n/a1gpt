@@ -1,13 +1,22 @@
 ## a1gpt
 
 throwaway C++ GPT-2 inference engine from @a1k0n w/ minimal but optimized BLAS
-ops for AVX and Apple Silicon
+ops for AVX and Apple Silicon, plus custom CUDA kernels.
 
-no external dependencies except for accelerate framework on macos
+no external dependencies except for accelerate framework on macos, and CUDA if
+you have it available.
 
 ## build / run
 
- - First, download and convert the model
+ - First, download the model:
+
+To just grab a copy of the model without using Python or anything:
+
+```
+(cd model && wget https://www.a1k0n.net/models/gpt2-weights.bin)
+```
+
+To download from huggingface and convert the model yourself:
 
 `$ python3 scripts/download_and_convert_gpt2.py`
 
@@ -21,15 +30,25 @@ note: RelWithDebInfo is the default build type, so it should run pretty quick
 $ mkdir build
 $ cd build
 $ cmake ..
+
 -- The CXX compiler identification is GNU 11.3.0
 -- Detecting CXX compiler ABI info
 -- Detecting CXX compiler ABI info - done
 -- Check for working CXX compiler: /usr/bin/c++ - skipped
 -- Detecting CXX compile features
 -- Detecting CXX compile features - done
+-- Looking for a CUDA compiler
+-- Looking for a CUDA compiler - /usr/lib/cuda/bin/nvcc
+-- The CUDA compiler identification is NVIDIA 11.2.67
+-- Detecting CUDA compiler ABI info
+-- Detecting CUDA compiler ABI info - done
+-- Check for working CUDA compiler: /usr/lib/cuda/bin/nvcc - skipped
+-- Detecting CUDA compile features
+-- Detecting CUDA compile features - done
 -- Configuring done
 -- Generating done
 -- Build files have been written to: a1gpt/build
+
 $ make -j
 [ 12%] Building CXX object CMakeFiles/bpe_test.dir/bpe_test.cpp.o
 [ 25%] Building CXX object CMakeFiles/bpe_test.dir/bpe.cpp.o
@@ -50,6 +69,8 @@ Usage: ./gpt2 [-s seed] [-t sampling_temperature] [-p prompt]
   -c cfg_scale: classifier-free guidance scale; 1.0 means no CFG (default: 1.0)
 
 ```
+
+This builds `gpt2` and `cugpt2` for the CUDA version, if available.
 
 Example generation on a Macbook Air M2 with default prompt, temperature:
 ```
